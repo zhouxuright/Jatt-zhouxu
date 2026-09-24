@@ -68,9 +68,18 @@ class EmbeddingService:
 
     @property
     def dimension(self) -> int:
-        """Return the embedding vector dimension."""
+        """Return the embedding vector dimension.
+
+        Before the model is loaded this assumes the default model's dimension
+        (768 for text2vec-base-chinese). `vector_store._get_dimension()` uses
+        this to *create* collections, so a wrong guess here would produce a
+        collection whose vector field cannot accept the embeddings actually
+        written into it. `_load_local_model()` therefore overwrites
+        `_dimension` with the real value as soon as the model is loaded, and
+        `_embed_api()` does the same.
+        """
         if self._dimension is None:
-            # Default dimension for text2vec-base-chinese
+            # Default dimension for DEFAULT_MODEL (text2vec-base-chinese)
             self._dimension = 768
         return self._dimension
 

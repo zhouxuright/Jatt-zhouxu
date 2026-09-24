@@ -277,8 +277,11 @@ class SearchCasesTool(MCPTool):
             return ToolResult(success=False, error="必须提供 query 参数")
 
         try:
-            from app.rag.milvus_service import get_milvus_service
-            milvus = get_milvus_service()
+            # 导入名此前写作 get_milvus_service —— 该名字在 milvus_service 中
+            # 并不存在（真实导出为 get_milvus_rag_service），因此案例检索工具
+            # 每次调用都以 ImportError 落入下面的兜底分支。
+            from app.rag.milvus_service import get_milvus_rag_service
+            milvus = get_milvus_rag_service()
             results = milvus.search_cases(
                 query=query, top_k=top_k,
                 case_type=case_type or "", court_name=court_name or "",

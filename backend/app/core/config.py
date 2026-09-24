@@ -59,7 +59,11 @@ class Settings(BaseSettings):
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530
     MILVUS_COLLECTION_NAME: str = "legal_documents"
-    MILVUS_DIMENSION: int = 1536
+    # 向量维度必须与实际嵌入模型一致。此前默认 1536（OpenAI ada-002 的维度），
+    # 但实际嵌入模型是 BAAI/bge-m3（1024 维，见 model_registry.py），
+    # 用它建集合后插入 1024 维向量会直接失败（实测 legal_articles / legal_cases
+    # 两个集合均为 dim=1024）。
+    MILVUS_DIMENSION: int = 1024
 
     # ------------------------------------------------------------------
     # ChromaDB (fallback / local vector store)
@@ -88,7 +92,15 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Embedding
     # ------------------------------------------------------------------
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # ⚠️ 注意：本项**不控制**主检索语料（legal_articles / legal_cases）的嵌入模型。
+    # 那些集合的向量由 `services/model_registry.py` 中的 ModelRegistry 生成，
+    # 模型硬编码为 BAAI/bge-m3（1024 维），不读本配置。
+    #
+    # 本项仅供 EmbeddingService（`rag/embedding_service.py`）使用，它服务于
+    # 用户上传文档路径（user_documents / legal_knowledge 两个集合，实测均为
+    # 768 维）。此处默认值原先误写为 all-MiniLM-L6-v2（384 维），与实际写入
+    # 的 768 维不符，已更正为 EmbeddingService.DEFAULT_MODEL 的真实取值。
+    EMBEDDING_MODEL: str = "shibing624/text2vec-base-chinese"
     EMBEDDING_DEVICE: str = "cpu"
 
     # ------------------------------------------------------------------

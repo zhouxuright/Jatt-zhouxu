@@ -193,7 +193,17 @@ class VectorStoreManager:
             raise
 
     def _get_dimension(self) -> int:
-        """Get the embedding dimension from the embedding service."""
+        """Get the embedding dimension used to create collections.
+
+        Prefers the embedding service's dimension, which it resolves from the
+        actually-loaded model. Falls back to the configured MILVUS_DIMENSION.
+
+        NOTE: this value must match the embeddings written by
+        `add_documents()`. If they disagree, collection creation succeeds and
+        every insert then fails on a dimension mismatch, so the two must come
+        from the same source — do not pass an embedding service here unless it
+        is the same instance used for insertion.
+        """
         if self._embedding_service is not None:
             return self._embedding_service.dimension
         return settings.MILVUS_DIMENSION
