@@ -1,0 +1,104 @@
+# 法律智能辅助系统 - 告警规则
+
+groups:
+  - name: legal_system_alerts
+    rules:
+      # 后端健康检查
+      - alert: BackendDown
+        expr: up{job="legal-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端服务不可用"
+          description: "后端实例 {{ $labels.instance }} 已停止响应"
+
+      # API 响应时间告警
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API 响应时间过高"
+          description: "P95 响应时间超过 5 秒: {{ $value }}s"
+
+      # 错误率告警
+      - alert: HighErrorRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API 错误率过高"
+          description: "5xx 错误率: {{ $value | humanizePercentage }}"
+
+      # LLM API 调用失败
+      - alert: LLMAPIErrors
+        expr: rate(llm_api_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM API 调用频繁失败"
+          description: "LLM API 错误率: {{ $value }}/s"
+
+      # 数据库连接池耗尽
+      - alert: DBConnectionPoolExhausted
+        expr: db_pool_available_connections == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "数据库连接池耗尽"
+          description: "PostgreSQL 连接池无可用连接"
+
+      # Redis 内存使用
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis 内存使用率过高"
+          description: "Redis 内存使用: {{ $value | humanizePercentage }}"
+
+      # Milvus 向量库健康
+      - alert: MilvusDown
+        expr: up{job="milvus"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Milvus 向量库不可用"
+          description: "Milvus 实例 {{ $labels.instance }} 无响应"
+
+      # 磁盘空间
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "磁盘空间不足"
+          description: "磁盘剩余空间不足 10%: {{ $value | humanizePercentage }}"
+
+      # 速率限制触发
+      - alert: RateLimitTriggered
+        expr: rate(rate_limit_rejected_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "速率限制频繁触发"
+          description: "每秒 {{ $value }} 次请求被限制"
+
+      # 语义缓存命中率低
+      - alert: SemanticCacheHitRateLow
+        expr: semantic_cache_hit_rate < 0.1
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "语义缓存命中率过低"
+          description: "缓存命中率: {{ $value | humanizePercentage }}，建议检查缓存策略"

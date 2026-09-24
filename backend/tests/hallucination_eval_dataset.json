@@ -1,0 +1,127 @@
+{
+  "name": "legal_hallucination_minimal_eval",
+  "version": "1.0",
+  "description": "最小法律幻觉评测集：每条用例给出用户问题、应引用的法条（expected_citations）以及严禁出现的法条（forbidden_citations）。用于量化评测大模型回答的引用精确率/召回率与法条编造（幻觉）情况。法条号统一使用中文数字（如 第三十八条），评测器内部会归一化为整数比较。",
+  "cases": [
+    {
+      "id": "eval_labor_001",
+      "category": "劳动争议-拖欠工资与解除",
+      "query": "老板三个月没发工资，还把我开除了，咋办",
+      "professional_query": "用人单位连续三个月未支付劳动报酬并单方解除劳动合同，劳动者应如何主张权利？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国劳动合同法", "article_number": "第三十八条"},
+        {"law_name": "中华人民共和国劳动合同法", "article_number": "第四十六条"},
+        {"law_name": "中华人民共和国劳动合同法", "article_number": "第四十七条"},
+        {"law_name": "中华人民共和国劳动合同法", "article_number": "第八十五条"}
+      ],
+      "forbidden_citations": [
+        {"law_name": "中华人民共和国刑法", "article_number": "第二百六十六条"}
+      ]
+    },
+    {
+      "id": "eval_loan_002",
+      "category": "民间借贷",
+      "query": "借了钱不还怎么办",
+      "professional_query": "民间借贷的借款人逾期不还款，出借人应如何主张债权？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国民法典", "article_number": "第六百六十七条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第六百七十五条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第六百七十六条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第六百八十条"}
+      ],
+      "forbidden_citations": []
+    },
+    {
+      "id": "eval_custody_003",
+      "category": "婚姻家庭-抚养权",
+      "query": "离婚了孩子抚养权归谁",
+      "professional_query": "离婚后未成年子女的抚养权归属与抚养费应如何确定？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千零八十四条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千零八十五条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千零八十六条"}
+      ],
+      "forbidden_citations": []
+    },
+    {
+      "id": "eval_lease_004",
+      "category": "房屋租赁-押金",
+      "query": "租房押金不退怎么办",
+      "professional_query": "房屋租赁期限届满，出租人拒不退还押金，承租人应如何主张权利？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国民法典", "article_number": "第七百零三条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第七百零八条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第七百三十三条"}
+      ],
+      "forbidden_citations": []
+    },
+    {
+      "id": "eval_tort_005",
+      "category": "侵权责任-人身损害",
+      "query": "被人打了怎么索赔",
+      "professional_query": "因他人故意侵害导致人身损害，受害人应如何主张侵权损害赔偿？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千一百六十五条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千一百七十九条"}
+      ],
+      "forbidden_citations": []
+    },
+    {
+      "id": "eval_contract_006",
+      "category": "合同违约责任",
+      "query": "签了合同对方违约怎么办",
+      "professional_query": "合同一方不履行或不完全履行合同义务，守约方可主张何种违约责任？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国民法典", "article_number": "第五百七十七条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第五百八十四条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第五百八十五条"}
+      ],
+      "forbidden_citations": []
+    },
+    {
+      "id": "eval_criminal_007",
+      "category": "刑事-盗窃",
+      "query": "偷东西会被判多久",
+      "professional_query": "盗窃公私财物的行为可能承担何种刑事责任？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国刑法", "article_number": "第二百六十四条"}
+      ],
+      "forbidden_citations": [
+        {"law_name": "中华人民共和国刑法", "article_number": "第二百六十六条"}
+      ]
+    },
+    {
+      "id": "eval_traffic_008",
+      "category": "交通事故",
+      "query": "被车撞了怎么赔偿",
+      "professional_query": "机动车与非机动车/行人发生交通事故，赔偿责任应如何划分？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国道路交通安全法", "article_number": "第七十六条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千二百零八条"}
+      ],
+      "forbidden_citations": []
+    },
+    {
+      "id": "eval_inherit_009",
+      "category": "继承",
+      "query": "老人去世了遗产怎么分",
+      "professional_query": "被继承人死亡后遗产应按何种顺序和范围进行继承？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千一百二十三条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千一百二十七条"},
+        {"law_name": "中华人民共和国民法典", "article_number": "第一千一百三十三条"}
+      ],
+      "forbidden_citations": []
+    },
+    {
+      "id": "eval_consumer_010",
+      "category": "消费维权-欺诈",
+      "query": "买到假货能要求退一赔三吗",
+      "professional_query": "经营者提供商品有欺诈行为，消费者能否主张惩罚性赔偿？",
+      "expected_citations": [
+        {"law_name": "中华人民共和国消费者权益保护法", "article_number": "第五十五条"}
+      ],
+      "forbidden_citations": []
+    }
+  ]
+}

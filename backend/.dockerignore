@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+venv_gpu/
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Local data & databases (kept out of image; volumes provide persistence)
+legal_assistant.db
+dump.rdb
+chroma_data/
+uploads/
+data/
+crawler_data*/
+*.sqlite3
+
+# Logs & debug artifacts
+*.log
+logs/
+debug_page.html
+debug_screenshot.png
+debug_output*/
+
+# Git & tooling
+.git/
+.gitignore
+.vscode/
+.mimosa/
+.claude/
+
+# Tests (not needed in runtime image)
+tests/
+pytest.ini
+.coverage
+htmlcov/
+
+# Docs
+*.md
+docs/

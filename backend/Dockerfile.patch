@@ -1,0 +1,15 @@
+# =============================================================================
+# Incremental patch build — reuses the current backend image (venv + ffmpeg
+# + whisper + all requirements already installed) and layers on the current
+# application code only. Use when only sources under backend/app changed.
+#
+#   docker build -f Dockerfile.patch -t legalintelligentassistancesystem-backend .
+#   docker compose up -d --no-deps backend
+#
+# Full clean rebuild remains: docker build -f Dockerfile .
+# =============================================================================
+FROM legalintelligentassistancesystem-backend:latest
+
+USER root
+COPY --chown=appuser:appuser . .
+USER appuser

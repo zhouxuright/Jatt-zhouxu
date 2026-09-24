@@ -1,0 +1,54 @@
+# Prometheus 监控配置 - 法律智能辅助系统
+# 与 docker-compose.yml 中的 PrometheusMiddleware 配合使用
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 告警规则
+rule_files:
+  - "legal_alerts.yml"
+
+# 抓取配置
+scrape_configs:
+  # 后端应用指标
+  - job_name: 'legal-backend'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['backend:8001']
+        labels:
+          service: 'legal-api'
+          environment: 'production'
+
+  # PostgreSQL 指标 (需要 postgres_exporter)
+  - job_name: 'postgresql'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          service: 'postgres'
+
+  # Redis 指标 (需要 redis_exporter)
+  - job_name: 'redis'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: 'redis'
+
+  # Milvus 指标
+  - job_name: 'milvus'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['milvus:9091']
+        labels:
+          service: 'milvus'
+
+  # Nginx 指标
+  - job_name: 'nginx'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+        labels:
+          service: 'nginx'

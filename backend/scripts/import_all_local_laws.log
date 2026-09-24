@@ -1,0 +1,148 @@
+2026-08-28 22:11:59,937 [INFO] ============================================================
+2026-08-28 22:11:59,937 [INFO] Starting comprehensive local law data import
+2026-08-28 22:11:59,937 [INFO] Data directory: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:11:59,937 [INFO] ============================================================
+2026-08-28 22:11:59,937 [INFO] 
+--- Phase 1: Import HuggingFace law files (117 files) ---
+2026-08-28 22:12:00,414 [INFO] Loading BGE-M3 embedding model …
+2026-08-28 22:12:06,291 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:12:08,429 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:12:08,443 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:12:08,443 [INFO] BGE-M3 loaded.
+2026-08-28 22:12:09,160 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 662)
+2026-08-28 22:12:09,160 [INFO] Found 117 HuggingFace law files in D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:12:46,171 [ERROR] Phase 1 failed: Expected IDs to be unique, found 35 duplicated IDs: hf_4405dec40d5363fd, hf_293c873b44761089, hf_889332cc4340e938, hf_ae52ae2b85bb64f3, hf_40e561f5ec5fbe1f, ..., hf_0abd08169cdf8817, hf_99e9fb46bbfb18da, hf_157505951a10e6a5, hf_31e9771020451b2a, hf_0b44b799a40aa959 in add.
+Traceback (most recent call last):
+  File "D:\Legal Intelligent Assistance System\backend\scripts\import_all_local_laws.py", line 464, in main
+    await import_hf_laws()
+  File "D:\Legal Intelligent Assistance System\backend\scripts\import_all_local_laws.py", line 322, in import_hf_laws
+    flush_embeddings(pending_embeddings, collection, model, stats)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Legal Intelligent Assistance System\backend\scripts\import_all_local_laws.py", line 169, in flush_embeddings
+    collection.add(
+    ~~~~~~~~~~~~~~^
+        ids=ids,
+        ^^^^^^^^
+    ...<2 lines>...
+        documents=documents,
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\1\AppData\Roaming\Python\Python313\site-packages\chromadb\api\models\Collection.py", line 109, in add
+    add_request = self._validate_and_prepare_add_request(
+        ids=ids,
+    ...<4 lines>...
+        uris=uris,
+    )
+  File "C:\Users\1\AppData\Roaming\Python\Python313\site-packages\chromadb\api\models\CollectionCommon.py", line 103, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\1\AppData\Roaming\Python\Python313\site-packages\chromadb\api\models\CollectionCommon.py", line 235, in _validate_and_prepare_add_request
+    validate_insert_record_set(record_set=add_records)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\1\AppData\Roaming\Python\Python313\site-packages\chromadb\api\types.py", line 445, in validate_insert_record_set
+    validate_ids(record_set["ids"])
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\1\AppData\Roaming\Python\Python313\site-packages\chromadb\api\types.py", line 1039, in validate_ids
+    raise errors.DuplicateIDError(message)
+chromadb.errors.DuplicateIDError: Expected IDs to be unique, found 35 duplicated IDs: hf_4405dec40d5363fd, hf_293c873b44761089, hf_889332cc4340e938, hf_ae52ae2b85bb64f3, hf_40e561f5ec5fbe1f, ..., hf_0abd08169cdf8817, hf_99e9fb46bbfb18da, hf_157505951a10e6a5, hf_31e9771020451b2a, hf_0b44b799a40aa959 in add.
+2026-08-28 22:12:46,225 [INFO] 
+--- Phase 2: Import law metadata (parquet_laws.json) ---
+2026-08-28 22:12:46,283 [INFO] Processing 22552 law metadata records from parquet_laws.json
+2026-08-28 22:12:46,384 [INFO]   [Metadata] 200/22552 processed — 196 created, 4 skipped
+2026-08-28 22:12:46,386 [ERROR] Phase 2 failed: Multiple rows were found when one or none was required
+Traceback (most recent call last):
+  File "D:\Legal Intelligent Assistance System\backend\scripts\import_all_local_laws.py", line 471, in main
+    await import_parquet_metadata()
+  File "D:\Legal Intelligent Assistance System\backend\scripts\import_all_local_laws.py", line 385, in import_parquet_metadata
+    if result.scalar_one_or_none():
+       ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\1\AppData\Roaming\Python\Python313\site-packages\sqlalchemy\engine\result.py", line 1541, in scalar_one_or_none
+    return self._only_one_row(
+           ~~~~~~~~~~~~~~~~~~^
+        raise_for_second_row=True, raise_for_none=False, scalar=True
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\1\AppData\Roaming\Python\Python313\site-packages\sqlalchemy\engine\result.py", line 852, in _only_one_row
+    raise exc.MultipleResultsFound(
+    ...<4 lines>...
+    )
+sqlalchemy.exc.MultipleResultsFound: Multiple rows were found when one or none was required
+2026-08-28 22:12:46,402 [INFO] 
+--- Phase 3: Final statistics ---
+2026-08-28 22:12:46,423 [INFO] ============================================================
+2026-08-28 22:12:46,423 [INFO] FINAL DATABASE STATISTICS
+2026-08-28 22:12:46,423 [INFO] ============================================================
+2026-08-28 22:12:46,423 [INFO]   PostgreSQL — Laws           : 210
+2026-08-28 22:12:46,423 [INFO]   PostgreSQL — Articles        : 746
+2026-08-28 22:12:46,423 [INFO]   ChromaDB   — Embeddings      : 662
+2026-08-28 22:12:46,423 [INFO] ============================================================
+2026-08-28 22:12:46,423 [INFO] Import complete!
+2026-08-28 22:12:46,424 [INFO] Total elapsed time: 0:00:46.486659
+2026-08-28 22:16:09,614 [INFO] ============================================================
+2026-08-28 22:16:09,614 [INFO] Starting comprehensive local law data import
+2026-08-28 22:16:09,614 [INFO] Data directory: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:16:09,614 [INFO] ============================================================
+2026-08-28 22:16:09,614 [INFO] 
+--- Phase 1: Import HuggingFace law files (117 files) ---
+2026-08-28 22:16:10,100 [INFO] Loading BGE-M3 embedding model …
+2026-08-28 22:16:15,743 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:16:17,785 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:16:17,790 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:16:17,790 [INFO] BGE-M3 loaded.
+2026-08-28 22:16:18,953 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 662)
+2026-08-28 22:16:18,954 [INFO] Found 117 HuggingFace law files in D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:18:46,588 [INFO]   [ChromaDB] Flushed 109 embeddings  (total in collection: 771)
+2026-08-28 22:18:59,746 [INFO] ============================================================
+2026-08-28 22:18:59,746 [INFO] Starting comprehensive local law data import
+2026-08-28 22:18:59,746 [INFO] Data directory: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:18:59,746 [INFO] ============================================================
+2026-08-28 22:18:59,746 [INFO] 
+--- Phase 1: Import HuggingFace law files (117 files) ---
+2026-08-28 22:19:00,932 [INFO] Loading BGE-M3 embedding model …
+2026-08-28 22:19:26,568 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:19:35,334 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:19:35,673 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:19:35,673 [INFO] BGE-M3 loaded.
+2026-08-28 22:19:43,106 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 771)
+2026-08-28 22:19:43,106 [INFO] Found 117 HuggingFace law files in D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:22:24,599 [INFO]   [ChromaDB] Flushed 83 embeddings  (total in collection: 854)
+2026-08-28 22:24:03,381 [INFO]   [ChromaDB] Flushed 95 embeddings  (total in collection: 949)
+2026-08-28 22:24:03,492 [INFO] [HF] Progress 10/117 files | Laws: 2 new / 8 existing | Articles: 139 new / 328 skipped | Embeddings pending: 44
+2026-08-28 22:25:56,588 [INFO]   [ChromaDB] Flushed 64 embeddings  (total in collection: 1013)
+2026-08-28 22:25:56,643 [INFO] [HF] Progress 10/117 files | Laws: 3 new / 7 existing | Articles: 256 new / 211 skipped | Embeddings pending: 0
+2026-08-28 22:29:26,978 [INFO] ============================================================
+2026-08-28 22:29:26,978 [INFO] Starting comprehensive local law data import
+2026-08-28 22:29:26,978 [INFO] Data directory: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:29:26,978 [INFO] ============================================================
+2026-08-28 22:29:26,978 [INFO] 
+--- Phase 1: Import HuggingFace law files (117 files) ---
+2026-08-28 22:29:27,558 [INFO] Loading BGE-M3 embedding model …
+2026-08-28 22:29:34,015 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:29:36,612 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:29:36,619 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:29:36,620 [INFO] BGE-M3 loaded.
+2026-08-28 22:29:37,558 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 1013)
+2026-08-28 22:29:37,558 [INFO] Found 117 HuggingFace law files in D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:29:37,969 [INFO] [HF] Progress 10/117 files | Laws: 0 new / 10 existing | Articles: 0 new / 467 skipped | Embeddings pending: 0
+2026-08-28 22:29:48,038 [INFO] ============================================================
+2026-08-28 22:29:48,038 [INFO] Starting comprehensive local law data import
+2026-08-28 22:29:48,038 [INFO] Data directory: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:29:48,038 [INFO] ============================================================
+2026-08-28 22:29:48,038 [INFO] 
+--- Phase 1: Import HuggingFace law files (117 files) ---
+2026-08-28 22:29:49,626 [INFO] Loading BGE-M3 embedding model …
+2026-08-28 22:30:11,074 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:30:16,329 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:30:16,335 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:30:16,335 [INFO] BGE-M3 loaded.
+2026-08-28 22:30:18,129 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 1013)
+2026-08-28 22:30:18,129 [INFO] Found 117 HuggingFace law files in D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets
+2026-08-28 22:30:18,612 [INFO] [HF] Progress 10/117 files | Laws: 0 new / 10 existing | Articles: 0 new / 467 skipped | Embeddings pending: 0
+2026-08-28 22:33:00,194 [INFO]   [ChromaDB] Flushed 78 embeddings  (total in collection: 1091)
+2026-08-28 22:37:13,062 [INFO]   [ChromaDB] Flushed 93 embeddings  (total in collection: 1259)
+2026-08-28 22:37:13,208 [INFO] [HF] Progress 20/117 files | Laws: 2 new / 18 existing | Articles: 152 new / 917 skipped | Embeddings pending: 59
+2026-08-28 22:41:49,813 [INFO]   [ChromaDB] Flushed 108 embeddings  (total in collection: 1367)
+2026-08-28 22:41:49,853 [INFO] [HF] Progress 20/117 files | Laws: 1 new / 19 existing | Articles: 186 new / 883 skipped | Embeddings pending: 0
+2026-08-28 22:47:39,859 [INFO]   [ChromaDB] Flushed 148 embeddings  (total in collection: 1515)
+2026-08-28 22:47:56,772 [INFO]   [ChromaDB] Flushed 96 embeddings  (total in collection: 1611)

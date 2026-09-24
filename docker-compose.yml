@@ -1,0 +1,531 @@
+# =============================================================================
+# Legal Intelligent Assistance System - Docker Compose (Production)
+# =============================================================================
+# High-concurrency deployment with:
+# - 3 backend instances behind load balancer
+# - Resource limits per container
+# - Health checks with fast detection
+# - Redis for shared caching and rate limiting
+# - PostgreSQL for persistent storage
+# - Milvus for vector search (optional, via profiles)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL - Primary database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:18-alpine
+    container_name: legal_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-legal_assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-legal_assistant}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Redis - Cache, rate limiting, semantic cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: legal_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --loglevel warning
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Backend - FastAPI (3 replicas for high concurrency)
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Use container DNS (not host proxy) to resolve DeepSeek API
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    environment:
+      # Application
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:-change-me-to-a-secure-random-string}
+      # 字段级加密密钥（数据静态加密）。必须显式传入——否则容器内每个进程
+      # 会各自随机生成密钥，双副本下互相无法解密（历史缺陷）。
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      # Server
+      HOST: 0.0.0.0
+      PORT: 8001
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://localhost}
+      # Database (pool tuned for multi-instance: 50 per instance × 3 = 150 total)
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-legal_assistant}
+      DATABASE_POOL_SIZE: 50
+      DATABASE_MAX_OVERFLOW: 100
+      # Redis (shared across all instances for cache + rate limiting)
+      REDIS_URL: redis://redis:6379/0
+      REDIS_MAX_CONNECTIONS: 20
+      # LLM
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_API_BASE: ${DEEPSEEK_API_BASE:-https://api.deepseek.com/v1}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      # Embedding
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      # Milvus
+      MILVUS_HOST: ${MILVUS_HOST:-milvus}
+      MILVUS_PORT: ${MILVUS_PORT:-19530}
+      # JWT
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-jwt-secret-at-least-32-chars}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      # File Upload
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}
+      # Voice input (speech-to-text, local Whisper)
+      VOICE_ENABLED: ${VOICE_ENABLED:-true}
+      VOICE_MODEL_SIZE: ${VOICE_MODEL_SIZE:-base}
+      MAX_AUDIO_FILE_SIZE_MB: ${MAX_AUDIO_FILE_SIZE_MB:-10}
+      # Voice output (TTS)
+      TTS_ENABLED: ${TTS_ENABLED:-true}
+      TTS_ENGINE: ${TTS_ENGINE:-edge}
+      TTS_VOICE: ${TTS_VOICE:-zh-CN-XiaoxiaoNeural}
+      AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY:-}
+      AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-eastasia}
+      # Rate Limiting
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_PER_MINUTE: 60
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Proxy Pool
+      PROXY_POOL_ENABLED: ${PROXY_POOL_ENABLED:-false}
+      PROXY_POOL_URL: http://proxy_pool:5010
+      # Data Expansion
+      DATA_EXPANSION_ENABLED: ${DATA_EXPANSION_ENABLED:-true}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      # Fail fast on etag checks (5s) so cached models load even when the Hub is unreachable
+      HF_HUB_ETAG_TIMEOUT: "5"
+      # Model warmup gate (embedding + reranker load at startup)
+      MODEL_WARMUP_ENABLED: ${MODEL_WARMUP_ENABLED:-true}
+      # -----------------------------------------------------------------------
+      # Commercial feature flags (must be forwarded explicitly, otherwise the
+      # container falls back to code defaults and features silently degrade --
+      # e.g. 联网搜索 returned 0 results because no search key reached the app).
+      # -----------------------------------------------------------------------
+      # MCP tool calling
+      MCP_TOOLS_ENABLED: ${MCP_TOOLS_ENABLED:-true}
+      ENTERPRISE_API_BASE: ${ENTERPRISE_API_BASE:-}
+      ENTERPRISE_API_KEY: ${ENTERPRISE_API_KEY:-}
+      # Skills assembly
+      SKILLS_ENABLED: ${SKILLS_ENABLED:-true}
+      # Deep thinking / reasoning
+      DEEP_THINKING_ENABLED: ${DEEP_THINKING_ENABLED:-true}
+      REASONING_MODEL: ${REASONING_MODEL:-deepseek-reasoner}
+      # Web search (联网搜索)
+      SEARCH_ENGINE: ${SEARCH_ENGINE:-serper}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+      BING_SEARCH_API_KEY: ${BING_SEARCH_API_KEY:-}
+      BAIDU_SEARCH_API_KEY: ${BAIDU_SEARCH_API_KEY:-}
+      # Additional LLM providers
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_API_BASE: ${QWEN_API_BASE:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen-max}
+      GLM_API_KEY: ${GLM_API_KEY:-}
+      GLM_API_BASE: ${GLM_API_BASE:-https://open.bigmodel.cn/api/paas/v4}
+      GLM_MODEL: ${GLM_MODEL:-glm-4}
+    volumes:
+      - backend_uploads:/app/uploads
+      - hf_cache:/home/appuser/.cache/huggingface
+      - whisper_models:/app/models/whisper
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # 运维/数据任务一次性容器（P2-6 等）
+  # ---------------------------------------------------------------------------
+  # 为什么单独定义一个服务：后端副本常驻 BGE-M3 + BGE-Reranker 约 2.5GiB，
+  # 在 4G 上限内再起一个进程加载第二个模型实例会被 OOMKill —— 而且 OOM 是
+  # 容器级的，会连带杀死正在对外服务的后端副本。因此批量向量化等内存密集任务
+  # 必须跑在独立容器里，并给足内存。
+  #
+  # 用法（用完容器自动删除，不影响在线服务）：
+  #   docker compose --profile tools run --rm backfill \
+  #       python scripts/backfill_milvus_articles.py --dry-run
+  #   docker compose --profile tools run --rm backfill \
+  #       python scripts/backfill_milvus_articles.py
+  #   docker compose --profile tools run --rm backfill \
+  #       python scripts/backfill_encryption.py
+  # 一次性高资源工具容器：跑回填/批量向量化等重任务。
+  # 独立于线上 backend（2 副本 × 4G），避免重任务把服务实例 OOM 掉。
+  # 本机为纯 CPU 推理且同时运行着另一套技术栈，实测 4 核 + 4 线程吞吐最高
+  # （提到 10 核因超订反而从 0.73 降到 0.50 篇/秒），故固定 4 核并显式限定
+  # 线程数，避免 torch 默认取 cpu_count/2 造成超订。
+  backfill:
+    profiles: ["tools"]
+    extends:
+      service: backend
+    # 显式复用 backend 的镜像标签。若只写 extends，compose 会为 backfill 生成
+    # 一个**同名不同内容**的独立镜像（legalintelligentassistancesystem-backfill），
+    # 且仅在镜像不存在时才构建——于是 backend 重建后 backfill 仍会跑旧代码，
+    # 表现为"改了脚本却不生效"。共用同一标签可根治。
+    image: ${COMPOSE_PROJECT_NAME:-legalintelligentassistancesystem}-backend:latest
+    restart: "no"
+    healthcheck:
+      disable: true
+    environment:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 12G
+          cpus: '4.0'
+    # 脚本目录只读挂载：tweaking 脚本后无需重建镜像即可生效（本项目为纯 CPU
+    # 重任务容器，迭代频繁；"改了脚本却不生效"已多次被误判为逻辑 bug）。
+    # reports 目录可写，保证脚本产出的清单能落回宿主机而不随 --rm 丢失。
+    volumes:
+      - ./backend/scripts:/app/scripts:ro
+      - ./backend/reports:/app/reports
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Frontend - Vue3 SPA served by Nginx
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: legal_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Nginx - Production reverse proxy (load balancer)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: legal_nginx
+    restart: unless-stopped
+    profiles:
+      - prod
+      - full
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Milvus - Vector database (optional, for RAG)
+  # ---------------------------------------------------------------------------
+  milvus:
+    image: milvusdb/milvus:v2.4.8
+    container_name: legal_milvus
+    restart: unless-stopped
+    profiles:
+      - full
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+    networks:
+      - legal_network
+
+  # Milvus dependencies
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: legal_etcd
+    restart: unless-stopped
+    profiles:
+      - full
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir=/etcd
+    networks:
+      - legal_network
+
+  minio:
+    image: minio/minio:RELEASE.2023-02-10T18-48-39Z
+    container_name: legal_minio
+    restart: unless-stopped
+    profiles:
+      - full
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Open-source proxy pool (IP代理池) - jhao104/proxy_pool
+  # API: GET /get/ (random proxy), /get_all/, /count/ - consumed by proxy_service.py
+  # ---------------------------------------------------------------------------
+  proxy_pool:
+    image: jhao104/proxy_pool:latest
+    container_name: proxy_pool
+    # Image ships proxy_pool.sh (bash) but has no bash; run scheduler+api via sh directly
+    entrypoint: ["tini", "--"]
+    command: ["sh", "-c", "python proxyPool.py schedule & exec python proxyPool.py server"]
+    environment:
+      - DB_CONN=redis://@redis:6379/0
+    ports:
+      - "5010:5010"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5010/count/', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Neo4j - Knowledge graph for legal relationships
+  # ---------------------------------------------------------------------------
+  neo4j:
+    image: neo4j:5-community
+    container_name: legal_neo4j
+    restart: unless-stopped
+    profiles:
+      - full
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/legalpassword}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP:-512m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-1G}
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 > /dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+    networks:
+      - legal_network
+
+  # ---------------------------------------------------------------------------
+  # Elasticsearch - Full-text search for laws and cases
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: elasticsearch:8.15.0
+    container_name: legal_elasticsearch
+    restart: unless-stopped
+    profiles:
+      - full
+    hostname: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - cluster.name=legal-es
+      - node.name=elasticsearch
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx1g"
+      - logger.org.elasticsearch.bootstrap=ERROR
+      - "networkhost=0.0.0.0"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "${ES_PORT:-9200}:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+    networks:
+      - legal_network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    name: legal_postgres_data
+    driver: local
+  redis_data:
+    name: legal_redis_data
+    driver: local
+  backend_uploads:
+    name: legal_backend_uploads
+    driver: local
+  hf_cache:
+    name: legal_hf_cache
+    driver: local
+  whisper_models:
+    name: legal_whisper_models
+    driver: local
+  milvus_data:
+    name: legal_milvus_data
+    driver: local
+  etcd_data:
+    name: legal_etcd_data
+    driver: local
+  minio_data:
+    name: legal_minio_data
+    driver: local
+  neo4j_data:
+    name: legal_neo4j_data
+    driver: local
+  neo4j_logs:
+    name: legal_neo4j_logs
+    driver: local
+  es_data:
+    name: legal_es_data
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  legal_network:
+    name: legal_network
+    driver: bridge

@@ -1,0 +1,17 @@
+# Prometheus configuration for the Legal Intelligent Assistance System
+# https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Backend API server
+  - job_name: "legal-assistant-backend"
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["backend:8000"]
+        labels:
+          service: "legal-assistant"
+          environment: "production"

@@ -1,0 +1,55 @@
+2026-08-28 22:18:41,776 [INFO] ======================================================================
+2026-08-28 22:18:41,776 [INFO] National Law Database Import
+2026-08-28 22:18:41,776 [INFO] Source: twang2218/law-datasets (GitHub)
+2026-08-28 22:18:41,776 [INFO] Data file: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets\laws.json
+2026-08-28 22:18:41,776 [INFO] ======================================================================
+2026-08-28 22:18:41,843 [INFO] Loading laws.json (this may take a while for 378MB)...
+2026-08-28 22:18:42,817 [INFO] Loaded 22552 laws in 1.0s
+2026-08-28 22:18:42,817 [INFO] Loading BGE-M3 embedding model...
+2026-08-28 22:18:53,962 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:18:57,626 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:18:57,633 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:18:57,634 [INFO] BGE-M3 loaded.
+2026-08-28 22:18:58,854 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 771)
+2026-08-28 22:18:58,889 [ERROR] Error processing law at index 0 (中华人民共和国宪法修正案（2018年）): 'laws_existing'
+2026-08-28 22:19:25,207 [INFO] ======================================================================
+2026-08-28 22:19:25,207 [INFO] National Law Database Import
+2026-08-28 22:19:25,207 [INFO] Source: twang2218/law-datasets (GitHub)
+2026-08-28 22:19:25,207 [INFO] Data file: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets\laws.json
+2026-08-28 22:19:25,207 [INFO] ======================================================================
+2026-08-28 22:19:25,275 [INFO] Loading laws.json (this may take a while for 378MB)...
+2026-08-28 22:19:26,209 [INFO] Loaded 22552 laws in 0.9s
+2026-08-28 22:19:26,210 [INFO] Loading BGE-M3 embedding model...
+2026-08-28 22:19:32,521 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:19:41,043 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:19:41,090 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:19:41,091 [INFO] BGE-M3 loaded.
+2026-08-28 22:19:47,701 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 771)
+2026-08-28 22:29:20,228 [INFO] ======================================================================
+2026-08-28 22:29:20,228 [INFO] National Law Database Import
+2026-08-28 22:29:20,228 [INFO] Source: twang2218/law-datasets (GitHub)
+2026-08-28 22:29:20,228 [INFO] Data file: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets\laws.json
+2026-08-28 22:29:20,228 [INFO] ======================================================================
+2026-08-28 22:29:20,296 [INFO] Loading laws.json (this may take a while for 378MB)...
+2026-08-28 22:29:21,288 [INFO] Loaded 22552 laws in 1.0s
+2026-08-28 22:29:21,288 [INFO] Loading BGE-M3 embedding model...
+2026-08-28 22:29:31,867 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:29:34,972 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:29:34,978 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:29:34,978 [INFO] BGE-M3 loaded.
+2026-08-28 22:29:35,577 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 1013)
+2026-08-28 22:34:00,439 [INFO]   [ChromaDB] Flushed 75 embeddings  (total in collection: 1166)
+2026-08-28 22:34:38,953 [INFO] ======================================================================
+2026-08-28 22:34:38,953 [INFO] National Law Database Import
+2026-08-28 22:34:38,953 [INFO] Source: twang2218/law-datasets (GitHub)
+2026-08-28 22:34:38,953 [INFO] Data file: D:\Legal Intelligent Assistance System\backend\scripts\..\data\datasets\laws.json
+2026-08-28 22:34:38,953 [INFO] ======================================================================
+2026-08-28 22:34:39,032 [INFO] Loading laws.json (this may take a while for 378MB)...
+2026-08-28 22:34:40,044 [INFO] Loaded 22552 laws in 1.0s
+2026-08-28 22:34:40,054 [INFO] Loading BGE-M3 embedding model...
+2026-08-28 22:35:30,372 [INFO] Loading BGE-M3 embedding model from: C:/Users/1/.cache/huggingface/hub/models/BAAI--bge-m3/snapshots/master
+2026-08-28 22:35:38,686 [INFO] loading existing colbert_linear and sparse_linear---------
+2026-08-28 22:35:38,916 [INFO] BGE-M3 embedding model loaded successfully
+2026-08-28 22:35:38,917 [INFO] BGE-M3 loaded.
+2026-08-28 22:35:41,745 [INFO] ChromaDB collection 'legal_articles' ready (existing items: 1166)
+2026-08-28 22:47:58,784 [INFO]   [ChromaDB] Flushed 135 embeddings  (total in collection: 1746)

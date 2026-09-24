@@ -1,0 +1,209 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "📊 API 请求率",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[5m])) by (method, path)",
+          "legendFormat": "{{method}} {{path}}"
+        }
+      ]
+    },
+    {
+      "title": "⏱ API 响应时间 (P95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "P95 {{path}}"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "P50 {{path}}"
+        }
+      ]
+    },
+    {
+      "title": "✅ / ❌ 请求成功率",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"2..\"}[5m])) / sum(rate(http_requests_total[5m])) * 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "max": 100,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "yellow", "value": 90 },
+              { "color": "green", "value": 95 }
+            ]
+          },
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "title": "🔥 当前并发数",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(http_requests_in_progress)"
+        }
+      ]
+    },
+    {
+      "title": "🚫 速率限制拒绝数",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(increase(rate_limit_rejected_total[1h]))"
+        }
+      ]
+    },
+    {
+      "title": "🤖 LLM 调用统计",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_api_calls_total[5m])) by (model, provider)",
+          "legendFormat": "{{provider}}/{{model}}"
+        }
+      ]
+    },
+    {
+      "title": "💰 LLM Token 消耗",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_tokens_used_total[5m])) by (type)",
+          "legendFormat": "{{type}} tokens"
+        }
+      ]
+    },
+    {
+      "title": "🎯 语义缓存命中率",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "expr": "semantic_cache_hit_rate * 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "max": 100,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "yellow", "value": 30 },
+              { "color": "green", "value": 60 }
+            ]
+          },
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "title": "🗄 PostgreSQL 连接池",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 22 },
+      "targets": [
+        {
+          "expr": "db_pool_active_connections",
+          "legendFormat": "活跃连接"
+        },
+        {
+          "expr": "db_pool_available_connections",
+          "legendFormat": "可用连接"
+        }
+      ]
+    },
+    {
+      "title": "📈 向量检索延迟",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 22 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(vector_search_duration_seconds_bucket[5m]))",
+          "legendFormat": "P95 检索延迟"
+        }
+      ]
+    },
+    {
+      "title": "🔧 活跃 Agent 执行",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 22 },
+      "targets": [
+        {
+          "expr": "sum(agent_executions_active)"
+        }
+      ]
+    },
+    {
+      "title": "👥 在线用户数",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 28 },
+      "targets": [
+        {
+          "expr": "sum(active_users)"
+        }
+      ]
+    },
+    {
+      "title": "💬 对话总数 (今日)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 28 },
+      "targets": [
+        {
+          "expr": "increase(conversations_created_total[24h])"
+        }
+      ]
+    },
+    {
+      "title": "📝 生成文书数 (今日)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 28 },
+      "targets": [
+        {
+          "expr": "increase(documents_generated_total[24h])"
+        }
+      ]
+    },
+    {
+      "title": "📎 合同审查数 (今日)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 28 },
+      "targets": [
+        {
+          "expr": "increase(contract_reviews_total[24h])"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["legal", "ai"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "法律智能辅助系统 - 总览",
+  "uid": "legal-system-overview",
+  "version": 1
+}
