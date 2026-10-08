@@ -374,8 +374,23 @@ function handleGlobalClick(e: MouseEvent) {
   skillsPopoverVisible.value = false
 }
 
-// ── 加载 MCP 工具列表 ──
+// ── 加载 MCP 工具列表（带 localStorage 缓存，TTL 5 分钟）──
+const MCP_CACHE_KEY = 'mcp_tools_cache'
+const MCP_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
 async function loadMcpTools() {
+  // Check cache first
+  try {
+    const cached = localStorage.getItem(MCP_CACHE_KEY)
+    if (cached) {
+      const { data, timestamp } = JSON.parse(cached)
+      if (Date.now() - timestamp < MCP_CACHE_TTL) {
+        mcpToolsList.value = data
+        return
+      }
+    }
+  } catch { /* ignore cache parse errors */ }
+
   mcpToolsLoading.value = true
   try {
     const res = await mcpApi.listTools()
@@ -384,6 +399,13 @@ async function loadMcpTools() {
       description: t.description || '',
       category: t.category || 'utility',
     }))
+    // Save to cache
+    try {
+      localStorage.setItem(MCP_CACHE_KEY, JSON.stringify({
+        data: mcpToolsList.value,
+        timestamp: Date.now(),
+      }))
+    } catch { /* ignore storage quota errors */ }
   } catch {
     console.warn('加载 MCP 工具列表失败')
   } finally {
@@ -391,8 +413,22 @@ async function loadMcpTools() {
   }
 }
 
-// ── 加载技能包列表 ──
+// ── 加载技能包列表（带 localStorage 缓存，TTL 5 分钟）──
+const SKILLS_CACHE_KEY = 'skills_cache'
+
 async function loadSkills() {
+  // Check cache first
+  try {
+    const cached = localStorage.getItem(SKILLS_CACHE_KEY)
+    if (cached) {
+      const { data, timestamp } = JSON.parse(cached)
+      if (Date.now() - timestamp < MCP_CACHE_TTL) {
+        skillsList.value = data
+        return
+      }
+    }
+  } catch { /* ignore cache parse errors */ }
+
   skillsLoading.value = true
   try {
     const res = await skillsApi.listSkills()
@@ -402,6 +438,13 @@ async function loadSkills() {
       category: s.category || 'general',
       description: s.description || '',
     }))
+    // Save to cache
+    try {
+      localStorage.setItem(SKILLS_CACHE_KEY, JSON.stringify({
+        data: skillsList.value,
+        timestamp: Date.now(),
+      }))
+    } catch { /* ignore storage quota errors */ }
   } catch {
     console.warn('加载技能包列表失败')
   } finally {
@@ -522,10 +565,10 @@ async function handleSend() {
   const text = inputText.value.trim()
   if ((!text && uploadedFiles.value.length === 0) || chatStore.isSending) return
 
-  // 上传文件
+  // 上传文件（并行上传所有文件，而不是串行 await）
   let fileMetadata: any[] = []
   if (uploadedFiles.value.length > 0) {
-    for (const file of uploadedFiles.value) {
+    const uploadPromises = uploadedFiles.value.map(async (file: File) => {
       const formData = new FormData()
       formData.append('file', file)
       try {
@@ -537,17 +580,18 @@ async function handleSend() {
         })
         if (resp.ok) {
           const data = await resp.json()
-          fileMetadata.push({
+          return {
             filename: file.name,
             file_id: data.file_id || data.filename,
             content: data.extracted_text || '',
-          })
+          }
         }
       } catch (err) {
         console.warn(`文件上传失败: ${file.name}`, err)
-        fileMetadata.push({ filename: file.name, error: '上传失败' })
       }
-    }
+      return { filename: file.name, error: '上传失败' }
+    })
+    fileMetadata = (await Promise.all(uploadPromises)).filter(Boolean)
     uploadedFiles.value = []
   }
 

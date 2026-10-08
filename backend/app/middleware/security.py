@@ -2,6 +2,7 @@
 
 Provides:
 - SecurityHeadersMiddleware: Inject defensive HTTP headers into every response.
+  (Pure ASGI middleware for minimal overhead.)
 - InputSanitizationMiddleware: Reject oversized requests and strip null bytes.
 """
 
@@ -12,6 +13,7 @@ from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config import settings
 
@@ -27,51 +29,53 @@ _UPLOAD_PREFIXES = (
 
 
 # =============================================================================
-# SecurityHeadersMiddleware
+# SecurityHeadersMiddleware (pure ASGI — no BaseHTTPMiddleware overhead)
 # =============================================================================
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+# Pre-built header tuples (avoid re-creating bytes on every response)
+_SECURITY_HEADERS = [
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"x-xss-protection", b"1; mode=block"),
+    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+    (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+    (b"content-security-policy", b"default-src 'none'; frame-ancestors 'none'"),
+]
+
+_HSTS_HEADER = (
+    b"strict-transport-security",
+    b"max-age=63072000; includeSubDomains; preload",
+)
+
+
+class SecurityHeadersMiddleware:
     """Add security-related headers to every HTTP response.
 
-    Headers added:
-    - X-Content-Type-Options: nosniff   -- prevent MIME-type sniffing
-    - X-Frame-Options: DENY             -- prevent clickjacking via iframes
-    - X-XSS-Protection: 1; mode=block   -- legacy XSS filter for old browsers
-    - Strict-Transport-Security         -- force HTTPS (only in production)
-    - Content-Security-Policy           -- restrict resource origins
-    - Remove: Server header             -- hide server software version
+    Pure ASGI middleware (not BaseHTTPMiddleware) to avoid the overhead of
+    anyio cancel scope wrapping on every request.
     """
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        response: Response = await call_next(request)
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self._is_prod = settings.APP_ENV == "production"
 
-        # --- Defensive response headers ---
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = (
-            "camera=(), microphone=(), geolocation=()"
-        )
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        # Content-Security-Policy -- restrictive default; API serves JSON so
-        # we block everything except self for scripts/styles.
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; "
-            "frame-ancestors 'none'"
-        )
+        async def send_with_headers(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.extend(_SECURITY_HEADERS)
+                if self._is_prod:
+                    headers.append(_HSTS_HEADER)
+                # Remove Server header to avoid leaking software info
+                headers = [(k, v) for k, v in headers if k.lower() != b"server"]
+                message["headers"] = headers
+            await send(message)
 
-        # HSTS -- only meaningful when behind an HTTPS reverse proxy
-        if settings.APP_ENV == "production":
-            response.headers["Strict-Transport-Security"] = (
-                "max-age=63072000; includeSubDomains; preload"
-            )
-
-        # Remove the Server header to avoid leaking software/version info
-        if "server" in response.headers:
-            del response.headers["server"]
-
-        return response
+        await self.app(scope, receive, send_with_headers)
 
 
 # =============================================================================

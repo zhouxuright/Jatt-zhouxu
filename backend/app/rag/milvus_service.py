@@ -141,6 +141,7 @@ class MilvusRAGService:
     def __init__(self) -> None:
         self._connected = False
         self._collection_ready = False
+        self._collection_loaded = False  # Track if collection is already in memory
 
     def _ensure_connected(self) -> bool:
         if self._connected:
@@ -263,7 +264,10 @@ class MilvusRAGService:
         try:
             from pymilvus import Collection
             collection = Collection(LEGAL_ARTICLES_COLLECTION)
-            collection.load()
+            # Only load collection into memory if not already loaded
+            if not self._collection_loaded:
+                collection.load()
+                self._collection_loaded = True
 
             if collection.num_entities == 0:
                 return []
@@ -462,7 +466,10 @@ class MilvusRAGService:
             if not self.ensure_case_collection():
                 return []
             collection = Collection(LEGAL_CASES_COLLECTION)
-            collection.load()
+            # Only load on first use — subsequent calls find data already in memory
+            if not self._collection_loaded:
+                collection.load()
+                self._collection_loaded = True
 
             if collection.num_entities == 0:
                 return []

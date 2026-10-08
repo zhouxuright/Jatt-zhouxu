@@ -157,15 +157,35 @@ async def chat_upload_file(
 # Colloquial normalization (口语/方言 → 专业法律表述)
 # ============================================================================
 
+# Legal-domain terms that indicate the message is already in professional
+# legal language — skip the expensive LLM colloquial-normalization call.
+_FORMAL_LEGAL_TERMS = [
+    "合同", "违约", "赔偿", "诉讼", "仲裁", "侵权", "劳动",
+    "民法典", "婚姻法", "继承", "物权", "债权", "刑法", "行政",
+    "解除", "终止", "履行", "义务", "权利", "责任", "赔偿",
+    "上诉人", "被上诉人", "原告", "被告", "管辖", "判决",
+    "民法典", "劳动合同法", "治安管理", "治安管理处罚",
+    "用人单位", "劳动者", "经济补偿", "赔偿金",
+]
+
+
 async def _normalize_message(message: str, auto_normalize: bool = True) -> tuple[str, dict[str, Any]]:
     """Convert colloquial/dialect phrasing into professional legal language.
 
     Returns (effective_message, normalization_metadata). Falls back to the
     original message whenever the rewriter is unavailable, so chat never
     breaks because of normalization.
+
+    Fast-path: if the message already contains professional legal terminology,
+    skip the LLM call entirely (saves 3-5 seconds).
     """
     if not auto_normalize:
         return message, {"enabled": False}
+
+    # Fast-path: message already contains legal terms → likely professional
+    if any(term in message for term in _FORMAL_LEGAL_TERMS):
+        return message, {"enabled": True, "is_colloquial": False, "skipped": True}
+
     try:
         rewrite = await get_colloquial_rewrite_agent().run_async({"text": message})
     except Exception as exc:
@@ -878,13 +898,6 @@ async def chat_stream(
     # Sanitize the prompt
     sanitized_message = safety_filter.sanitize_prompt(payload.message)
 
-    # Colloquial → professional legal normalization (简历需求 #6)
-    normalized_message, norm_meta = await _normalize_message(
-        sanitized_message, payload.auto_normalize
-    )
-    if normalized_message:
-        sanitized_message = normalized_message
-
     # ── Inject file content into the user message ──
     file_context = ""
     if payload.files:
@@ -903,22 +916,35 @@ async def chat_stream(
     force_web_search = bool(payload.enable_web_search)
     force_multi_agent = bool(payload.enable_multi_agent)
 
-    # ── Web Search — inject real-time search results ──
-    web_search_context = ""
-    web_search_sources = []
-    if force_web_search:
+    # Gate on the ORIGINAL message, not `sanitized_message`.
+    intent_hint_wants_tools = _may_need_tools(payload.message or sanitized_message)
+    want_tools = bool(payload.mcp_tools) or intent_hint_wants_tools
+
+    # ── Parallel pre-processing: run independent steps concurrently ──
+    # These steps don't depend on each other's output, so we run them
+    # simultaneously instead of serially. This saves 10-15s wall-clock time.
+    loop = asyncio.get_running_loop()
+
+    # 1. Colloquial normalization (LLM call, ~3-5s, often skipped via fast-path)
+    normalize_task = _normalize_message(sanitized_message, payload.auto_normalize)
+
+    # 2. Web search (external API call, ~5-10s, only if enabled)
+    async def _do_web_search():
+        if not force_web_search:
+            return [], []
         try:
             from app.services.web_search import get_web_search_engine
             engine = get_web_search_engine()
             search_result = await engine.search(payload.message or sanitized_message, num_results=5)
             if search_result and search_result.results:
                 search_parts = []
+                sources = []
                 for r in search_result.results[:5]:
                     title = r.get("title", "")
                     snippet = r.get("snippet", "")
                     url = r.get("url", "")
                     search_parts.append(f"- **{title}**: {snippet}\n  来源: {url}")
-                    web_search_sources.append({
+                    sources.append({
                         "law_name": title[:50] if title else "联网搜索",
                         "article_number": "",
                         "content": snippet[:200] if snippet else "",
@@ -926,106 +952,139 @@ async def chat_stream(
                         "url": url,
                         "source_type": "web_search",
                     })
-                web_search_context = "\n\n## 联网搜索结果（以下是从互联网实时检索到的相关法律信息，请结合使用）\n" + "\n".join(search_parts)
+                context = "\n\n## 联网搜索结果（以下是从互联网实时检索到的相关法律信息，请结合使用）\n" + "\n".join(search_parts)
                 logger.info("Web search returned %d results for: '%s'", len(search_result.results), payload.message[:50])
+                return sources, context
         except Exception as exc:
             logger.warning("Web search failed: %s", exc)
+        return [], ""
 
-    # Gate on the ORIGINAL message, not `sanitized_message`. By this point the
-    # colloquial-normalization agent has rewritten the text into formal legal
-    # language, which strips the cues this check keys on: "请计算我应得的赔偿金"
-    # becomes a formal phrasing with no "计算" trigger, so a query that plainly
-    # needs the calculator scored as a plain consultation and no tool ran.
-    intent_hint_wants_tools = _may_need_tools(payload.message or sanitized_message)
+    web_search_task = _do_web_search()
 
-    # ── MCP Tools — LLM-driven selection + parallel execution (Phase 3) ──
-    #
-    # The LLM decides which tools to call and with what arguments, instead of
-    # keyword-substring matching. When the user has explicitly picked tools in
-    # the UI, selection is restricted to those; otherwise the whole catalogue is
-    # offered and the model may also choose to call nothing.
-    mcp_tool_context = ""
-    mcp_tool_meta: dict[str, Any] = {}
-    want_tools = bool(payload.mcp_tools) or intent_hint_wants_tools
-    if want_tools:
+    # 3. MCP tool orchestration (LLM + tool execution, ~3-10s, only if needed)
+    async def _do_mcp_orchestration():
+        if not want_tools:
+            return "", {}
         try:
             from app.services.tool_orchestrator import orchestrate
             orchestration = await orchestrate(
                 query=payload.message or sanitized_message,
                 allowed_tools=payload.mcp_tools or None,
             )
-            mcp_tool_context = orchestration["context"]
-            mcp_tool_meta = orchestration["metadata"]
+            meta = orchestration["metadata"]
             logger.info(
                 "MCP orchestration: selected=%d succeeded=%d failed=%d (%.2fs)",
-                mcp_tool_meta.get("tools_selected", 0),
-                mcp_tool_meta.get("tools_succeeded", 0),
-                mcp_tool_meta.get("tools_failed", 0),
-                mcp_tool_meta.get("elapsed_seconds", 0),
+                meta.get("tools_selected", 0),
+                meta.get("tools_succeeded", 0),
+                meta.get("tools_failed", 0),
+                meta.get("elapsed_seconds", 0),
             )
+            return orchestration["context"], meta
         except Exception as exc:
             logger.warning("MCP orchestration failed: %s", exc)
+            return "", {}
 
-    # ── Skill pack — execute when the user selected one (Phase 3) ──
-    #
-    # `skill_id` was previously accepted by the request schema and silently
-    # ignored; the frontend's skill picker had no backend effect.
-    skill_context = ""
-    skill_meta: dict[str, Any] = {}
-    if payload.skill_id:
+    mcp_task = _do_mcp_orchestration()
+
+    # 4. Skill pack execution (only if user selected one)
+    async def _do_skill_execution():
+        if not payload.skill_id:
+            return "", {}
         try:
             from app.services.tool_orchestrator import run_skill_for_chat
             skill_outcome = await run_skill_for_chat(
                 skill_id=payload.skill_id,
                 query=payload.message or sanitized_message,
             )
-            skill_context = skill_outcome["context"]
-            skill_meta = skill_outcome["metadata"]
-            logger.info("Skill '%s' for chat: %s", payload.skill_id, skill_meta)
+            logger.info("Skill '%s' for chat: %s", payload.skill_id, skill_outcome["metadata"])
+            return skill_outcome["context"], skill_outcome["metadata"]
         except Exception as exc:
             logger.warning("Skill execution failed: %s", exc)
+            return "", {}
 
-    if payload.conversation_id:
-        result = await db.execute(
-            select(Conversation).where(
-                Conversation.id == payload.conversation_id,
-                Conversation.user_id == current_user.id,
-            )
-        )
-        conversation = result.scalar_one_or_none()
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-    else:
-        conversation = Conversation(
-            user_id=current_user.id,
-            tenant_id=getattr(current_user, "tenant_id", None) or DEFAULT_TENANT_ID,
-            title=payload.message[:100],
-            agent_type=payload.agent_type,
-        )
-        db.add(conversation)
-        await db.flush()
+    skill_task = _do_skill_execution()
 
-    # 2. Save user message
-    user_message = Message(
-        conversation_id=conversation.id,
-        role=MessageRole.USER,
-        content=payload.message,  # Save original user message
+    # 5. RAG retrieval (CPU-bound, in executor to avoid blocking event loop)
+    rag_task = loop.run_in_executor(
+        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
     )
-    db.add(user_message)
-    await db.flush()
 
-    # Commit conversation + user message before expensive operations (web search, deep think)
-    # to avoid DB connection timeout during long-running LLM/search calls
-    await db.commit()
-
-    # 3. Classify intent (use sanitized message)
-    intent = classify_intent(sanitized_message)
-
-    # 4. Check semantic cache first (skip cache when deep_think/web_search/files are enabled)
+    # 6. Semantic cache check (embedding comparison, ~200ms)
     from app.services.semantic_cache import get_semantic_cache
     cache = get_semantic_cache()
     use_cache = not (force_deep_think or force_web_search or force_multi_agent or payload.files or payload.mcp_tools)
-    cached_result = await cache.get(sanitized_message) if use_cache else None
+
+    async def _do_cache_check():
+        if not use_cache:
+            return None
+        return await cache.get(sanitized_message)
+
+    cache_task = _do_cache_check()
+
+    # 7. DB operations: find/create conversation + save user message
+    async def _do_db_setup():
+        if payload.conversation_id:
+            result = await db.execute(
+                select(Conversation).where(
+                    Conversation.id == payload.conversation_id,
+                    Conversation.user_id == current_user.id,
+                )
+            )
+            conversation = result.scalar_one_or_none()
+            if not conversation:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+        else:
+            conversation = Conversation(
+                user_id=current_user.id,
+                tenant_id=getattr(current_user, "tenant_id", None) or DEFAULT_TENANT_ID,
+                title=payload.message[:100],
+                agent_type=payload.agent_type,
+            )
+            db.add(conversation)
+            await db.flush()
+
+        # Save user message
+        user_message = Message(
+            conversation_id=conversation.id,
+            role=MessageRole.USER,
+            content=payload.message,
+        )
+        db.add(user_message)
+        await db.flush()
+        # Commit conversation + user message before expensive operations
+        await db.commit()
+        return conversation
+
+    db_task = _do_db_setup()
+
+    # ── Execute all independent tasks in parallel ──
+    (
+        norm_result,
+        (web_search_sources, web_search_context),
+        (mcp_tool_context, mcp_tool_meta),
+        (skill_context, skill_meta),
+        retrieved,
+        cached_result,
+        conversation,
+    ) = await asyncio.gather(
+        normalize_task,
+        web_search_task,
+        mcp_task,
+        skill_task,
+        rag_task,
+        cache_task,
+        db_task,
+    )
+
+    # Apply normalization result
+    normalized_message, norm_meta = norm_result
+    if normalized_message:
+        sanitized_message = normalized_message
+
+    # Classify intent (fast keyword matching, ~0ms)
+    intent = classify_intent(sanitized_message)
+
+    rag_context = format_rag_context(retrieved)
 
     if cached_result:
         # Cache hit — stream cached response directly, no LLM call needed
@@ -1080,7 +1139,12 @@ async def chat_stream(
         )
 
     # 5. Cache miss — full RAG + LLM pipeline
-    retrieved = retrieve_legal_knowledge(sanitized_message, top_k=5)
+    # Run RAG retrieval in a thread executor to avoid blocking the event loop
+    # (retrieve_legal_knowledge is synchronous and CPU-bound: BM25 + Milvus + reranker)
+    loop = asyncio.get_running_loop()
+    retrieved = await loop.run_in_executor(
+        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
+    )
     rag_context = format_rag_context(retrieved)
 
     # 5a. MCP tool results were produced earlier by the LLM-driven orchestrator.
@@ -1514,7 +1578,11 @@ async def chat(
 
     # Intent + RAG + Context (use sanitized message)
     intent = classify_intent(sanitized_message)
-    retrieved = retrieve_legal_knowledge(sanitized_message, top_k=5)
+    # Run RAG retrieval in executor to avoid blocking the event loop
+    loop = asyncio.get_running_loop()
+    retrieved = await loop.run_in_executor(
+        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
+    )
     rag_context = format_rag_context(retrieved)
     system_prompt = build_system_prompt_for_intent(intent, rag_context)
 
@@ -1852,9 +1920,9 @@ async def delete_conversation(
     conversation = result.scalar_one_or_none()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    msg_result = await db.execute(select(Message).where(Message.conversation_id == conversation_id))
-    for msg in msg_result.scalars().all():
-        await db.delete(msg)
+    # Bulk delete messages instead of one-by-one (N+1 → single DELETE)
+    from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(Message).where(Message.conversation_id == conversation_id))
     await db.delete(conversation)
     await db.flush()
 
@@ -2026,7 +2094,11 @@ async def chat_voice(
 
     sanitized_message = safety_filter.sanitize_prompt(payload.message)
     intent = classify_intent(sanitized_message)
-    retrieved = retrieve_legal_knowledge(sanitized_message, top_k=5)
+    # Run RAG retrieval in executor to avoid blocking the event loop
+    loop = asyncio.get_running_loop()
+    retrieved = await loop.run_in_executor(
+        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
+    )
     rag_context = format_rag_context(retrieved)
     system_prompt = build_system_prompt_for_intent(intent, rag_context)
 

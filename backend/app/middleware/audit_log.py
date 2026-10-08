@@ -179,7 +179,11 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         request_body_hash: str | None = None
         if request.method in ("POST", "PUT", "PATCH"):
             try:
-                body_bytes = await request.body()
+                # Re-use body already read by InputSanitizationMiddleware
+                # to avoid a second full body read (BaseHTTPMiddleware overhead)
+                body_bytes = getattr(request, "_body", None)
+                if body_bytes is None:
+                    body_bytes = await request.body()
                 if body_bytes:
                     # Compute body hash (SHA256 of first 1KB)
                     request_body_hash = _compute_body_hash(body_bytes)

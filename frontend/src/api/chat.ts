@@ -25,6 +25,7 @@ export const chatApi = {
     onMeta: (meta: any) => void,
     onDone: (fullContent: string) => void,
     onError: (error: string) => void,
+    signal?: AbortSignal,
   ) {
     const token = localStorage.getItem('token')
     try {
@@ -35,6 +36,7 @@ export const chatApi = {
           'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify(data),
+        signal,
       })
 
       if (!response.ok) {
