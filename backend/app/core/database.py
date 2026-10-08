@@ -46,16 +46,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that yields an async database session.
 
     The session is automatically closed when the request finishes.
-    Only commits if the session has pending changes (avoids unnecessary
-    round-trips for read-only GET requests).
+    Always commits — needed because flush() sends changes to DB within
+    the transaction but is_dirty() returns False after flush, causing
+    data loss if commit is skipped.
     """
     async with async_session_factory() as session:
         try:
             yield session
-            # Only commit if there are pending changes — skip the extra DB
-            # round-trip for read-only requests (GET endpoints).
-            if session.is_dirty():
-                await session.commit()
+            await session.commit()
         except Exception:
             await session.rollback()
             raise
