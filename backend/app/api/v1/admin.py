@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_admin_user, get_db, get_tenant_id
+from app.api.deps import get_current_admin_user, get_current_user, get_db, get_tenant_id
 from app.core.config import settings
 from app.core.tenancy import is_platform_admin, scope_query
 from app.models.audit_log import AuditLog
@@ -375,7 +375,7 @@ class CorpusRegistryResponse(BaseModel):
     summary="法律语料资产与来源治理台账",
 )
 async def get_corpus_registry(
-    current_user: Annotated[User, Depends(get_current_admin_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CorpusRegistryResponse:
     """Return the measured legal-corpus inventory with provenance labels.

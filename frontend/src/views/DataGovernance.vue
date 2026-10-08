@@ -90,8 +90,8 @@
       </el-table>
     </el-card>
 
-    <!-- 合规审计 -->
-    <el-card shadow="never" class="section-card">
+    <!-- 合规审计（仅管理员可见） -->
+    <el-card v-if="isAdmin" shadow="never" class="section-card">
       <template #header>
         <div class="card-header">
           <span>合规审计日志</span>
@@ -140,8 +140,8 @@
       </div>
     </el-card>
 
-    <!-- 租户 -->
-    <el-card shadow="never" class="section-card">
+    <!-- 租户（仅管理员可见） -->
+    <el-card v-if="isAdmin" shadow="never" class="section-card">
       <template #header>
         <div class="card-header">
           <span>租户与数据隔离</span>
@@ -166,6 +166,12 @@
         <el-table-column prop="max_users" label="上限" width="90" align="right" />
       </el-table>
     </el-card>
+
+    <!-- 非管理员提示 -->
+    <el-card v-if="!isAdmin" shadow="never" class="section-card">
+      <el-result icon="info" title="管理员功能" sub-title="审计日志查询/导出、租户管理等功能仅对管理员开放。当前可查看所有用户均可见的语料资产登记信息。">
+      </el-result>
+    </el-card>
   </div>
 </template>
 
@@ -173,6 +179,10 @@
 import { onMounted, reactive, ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import adminApi from '@/api/admin'
+import { useAuthStore } from '@/stores/auth'
+
+const authStore = useAuthStore()
+const isAdmin = computed(() => authStore.isAdmin)
 
 const loading = ref(false)
 const auditLoading = ref(false)
@@ -342,14 +352,22 @@ async function exportJson() {
 
 function refreshAll() {
   loadRegistry()
-  loadAuditLogs()
-  loadTenants()
+  if (isAdmin.value) {
+    loadAuditLogs()
+    loadTenants()
+  }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // 确保用户信息已加载（用于角色判断）
+  if (!authStore.user) {
+    try { await authStore.fetchUser() } catch { /* ignore */ }
+  }
   loadRegistry()
-  loadAuditLogs()
-  loadTenants()
+  if (isAdmin.value) {
+    loadAuditLogs()
+    loadTenants()
+  }
 })
 </script>
 
