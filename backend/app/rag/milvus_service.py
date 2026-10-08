@@ -337,7 +337,10 @@ class MilvusRAGService:
         try:
             from pymilvus import Collection
             collection = Collection(LEGAL_ARTICLES_COLLECTION)
-            collection.load()
+            # Only load if not already in memory
+            if not self._collection_loaded:
+                collection.load()
+                self._collection_loaded = True
             return {"status": "ready", "collection": LEGAL_ARTICLES_COLLECTION, "count": collection.num_entities, "dimension": EMBEDDING_DIM}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}

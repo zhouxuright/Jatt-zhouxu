@@ -236,12 +236,24 @@ async def search_cases(
 # GET /cases/categories  (MUST be before /{case_id})
 # ---------------------------------------------------------------------------
 
+# Cache categories in memory — DISTINCT queries on 120k+ rows are expensive
+# and categories change rarely. TTL = 5 minutes.
+_categories_cache: dict[str, Any] = {"data": None, "timestamp": 0}
+_CATEGORIES_CACHE_TTL = 300  # 5 minutes
+
+
 @router.get("/categories", response_model=CaseCategoriesResponse)
 async def get_case_categories(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CaseCategoriesResponse:
     """Get available case categories (types, causes of action, courts)."""
+    import time
+
+    # Return cached result if still fresh
+    now = time.time()
+    if _categories_cache["data"] and (now - _categories_cache["timestamp"]) < _CATEGORIES_CACHE_TTL:
+        return _categories_cache["data"]
 
     # Get distinct case types
     type_result = await db.execute(
@@ -267,11 +279,17 @@ async def get_case_categories(
     )
     courts = [row[0] for row in court_result.all() if row[0]]
 
-    return CaseCategoriesResponse(
+    response = CaseCategoriesResponse(
         case_types=sorted(case_types),
         causes_of_action=sorted(causes),
         courts=sorted(courts),
     )
+
+    # Cache the result
+    _categories_cache["data"] = response
+    _categories_cache["timestamp"] = now
+
+    return response
 
 
 # ---------------------------------------------------------------------------

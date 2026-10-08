@@ -481,7 +481,8 @@ class AdvancedRAGPipeline:
             try:
                 from app.rag.milvus_service import get_milvus_rag_service
                 service = get_milvus_rag_service()
-                service.create_collection()
+                # create_collection() is handled internally by search() —
+                # no need to call it here (saves a has_collection() network round-trip)
                 vector_results = service.search(
                     query, top_k=top_k * 3,
                     exclude_sources=["generated", "synthetic"],

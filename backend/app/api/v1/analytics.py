@@ -85,81 +85,50 @@ async def get_dashboard_stats(
 ) -> DashboardStats:
     """Get system dashboard statistics.
 
-    Returns aggregate stats including total users, conversations,
-    messages, feedback scores, and today's activity.
+    Sequential lightweight COUNT queries. PostgreSQL handles these efficiently
+    with proper indexes. Single-query consolidation with scalar subqueries
+    was tested and found no faster (PG planner doesn't parallelise subqueries).
     """
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     thirty_days_ago = now - timedelta(days=30)
 
-    # Total users
-    total_users_result = await db.execute(
-        select(func.count(User.id))
-    )
-    total_users = total_users_result.scalar() or 0
+    async def _count(stmt) -> int:
+        return (await db.execute(stmt)).scalar() or 0
 
-    # Active users (last 30 days)
-    active_users_result = await db.execute(
-        select(func.count(func.distinct(Conversation.user_id)))
-        .where(Conversation.created_at >= thirty_days_ago)
-    )
-    active_users = active_users_result.scalar() or 0
-
-    # Total conversations
-    total_conversations_result = await db.execute(
-        select(func.count(Conversation.id))
-    )
-    total_conversations = total_conversations_result.scalar() or 0
-
-    # Total messages
-    total_messages_result = await db.execute(
-        select(func.count(Message.id))
-    )
-    total_messages = total_messages_result.scalar() or 0
-
-    # Total documents
-    total_documents_result = await db.execute(
-        select(func.count(Document.id))
-    )
-    total_documents = total_documents_result.scalar() or 0
-
-    # Total reviews (documents that are ready = reviewed)
-    total_reviews_result = await db.execute(
+    # Sequential queries — each is a fast index scan on small tables
+    total_users = await _count(select(func.count(User.id)))
+    total_conversations = await _count(select(func.count(Conversation.id)))
+    total_messages = await _count(select(func.count(Message.id)))
+    total_documents = await _count(select(func.count(Document.id)))
+    total_reviews = await _count(
         select(func.count(Document.id)).where(Document.status == "ready")
     )
-    total_reviews = total_reviews_result.scalar() or 0
 
-    # Average feedback score
-    feedback_stats_result = await db.execute(
-        select(
-            func.avg(Feedback.rating).label("avg_rating"),
-            func.count(Feedback.id).label("count"),
-        )
-    )
-    feedback_stats = feedback_stats_result.one_or_none()
+    # Feedback stats in one query
+    feedback_stats = (await db.execute(
+        select(func.avg(Feedback.rating).label("avg"), func.count(Feedback.id).label("cnt"))
+    )).one_or_none()
     avg_feedback = float(feedback_stats[0]) if feedback_stats and feedback_stats[0] else 0.0
     feedback_count = feedback_stats[1] if feedback_stats else 0
 
-    # Daily active users
-    daily_users_result = await db.execute(
+    # Time-filtered queries
+    active_users = await _count(
+        select(func.count(func.distinct(Conversation.user_id)))
+        .where(Conversation.created_at >= thirty_days_ago)
+    )
+    daily_active_users = await _count(
         select(func.count(func.distinct(Conversation.user_id)))
         .where(Conversation.created_at >= today_start)
     )
-    daily_active_users = daily_users_result.scalar() or 0
-
-    # Daily conversations
-    daily_conv_result = await db.execute(
+    daily_conversations = await _count(
         select(func.count(Conversation.id))
         .where(Conversation.created_at >= today_start)
     )
-    daily_conversations = daily_conv_result.scalar() or 0
-
-    # Daily messages
-    daily_msg_result = await db.execute(
+    daily_messages = await _count(
         select(func.count(Message.id))
         .where(Message.created_at >= today_start)
     )
-    daily_messages = daily_msg_result.scalar() or 0
 
     return DashboardStats(
         total_users=total_users,
