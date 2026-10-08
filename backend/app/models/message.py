@@ -3,7 +3,7 @@
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String, Text, Integer
+from sqlalchemy import ForeignKey, Index, String, Text, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.crypto_types import EncryptedText
@@ -25,6 +25,11 @@ class Message(Base, UUIDMixin, TimestampMixin):
     """A single message in a conversation."""
 
     __tablename__ = "messages"
+
+    __table_args__ = (
+        # Composite index for time-range queries on messages
+        Index("ix_messages_conversation_created", "conversation_id", "created_at"),
+    )
 
     conversation_id: Mapped[str] = mapped_column(
         String(36),

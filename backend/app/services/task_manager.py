@@ -51,7 +51,7 @@ class AsyncTaskManager:
         self._use_redis = True
 
     async def _get_redis(self):
-        """获取 Redis 连接（懒加载）。"""
+        """获取共享 Redis 连接（懒加载）。"""
         if self._redis is not None:
             return self._redis
 
@@ -59,14 +59,10 @@ class AsyncTaskManager:
             return None
 
         try:
-            import redis.asyncio as aioredis
-            self._redis = aioredis.from_url(
-                settings.REDIS_URL,
-                decode_responses=True,
-                max_connections=5,
-            )
-            # 测试连接
+            from app.core.redis import get_redis
+            self._redis = get_redis()
             await self._redis.ping()
+            logger.info("Task manager: using shared Redis client")
             return self._redis
         except Exception as exc:
             logger.warning("Redis unavailable for task manager, using memory store: %s", exc)

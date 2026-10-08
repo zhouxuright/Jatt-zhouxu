@@ -12,7 +12,6 @@ Tracks:
 from __future__ import annotations
 
 import time
-from typing import Callable
 
 from prometheus_client import (
     CollectorRegistry,
@@ -23,9 +22,6 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     REGISTRY,
 )
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
 
 # ---------------------------------------------------------------------------
 # Custom registry so we can also expose via the ``/metrics`` route handler
@@ -115,27 +111,44 @@ _SKIP_METRICS_PREFIXES = (
 )
 
 
-class PrometheusMiddleware(BaseHTTPMiddleware):
-    """ASGI middleware that records Prometheus metrics for every HTTP request."""
+class PrometheusMiddleware:
+    """Pure ASGI middleware that records Prometheus metrics for every HTTP request.
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        path = request.url.path
+    Converted from BaseHTTPMiddleware to pure ASGI to avoid the overhead of
+    anyio cancel scope wrapping on every request.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
 
         # Skip health-check / docs / static endpoints
         for prefix in _SKIP_METRICS_PREFIXES:
             if path == prefix or path.startswith(prefix):
-                return await call_next(request)
+                await self.app(scope, receive, send)
+                return
 
         normalised_path = _normalise_path(path)
-        method = request.method
+        method = scope.get("method", "GET")
+        status_code = 500
 
         HTTP_IN_PROGRESS.inc()
         start = time.perf_counter()
-        status_code = 500
+
+        async def send_capture(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status_code", 500)
+            await send(message)
+
         try:
-            response = await call_next(request)
-            status_code = response.status_code
-            return response
+            await self.app(scope, receive, send_capture)
         except Exception:
             status_code = 500
             raise

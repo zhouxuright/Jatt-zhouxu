@@ -3,7 +3,7 @@
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.crypto_types import EncryptedJSON, EncryptedText
@@ -19,6 +19,13 @@ class Conversation(Base, UUIDMixin, TimestampMixin):
     """A conversation (chat session) between a user and the AI assistant."""
 
     __tablename__ = "conversations"
+
+    __table_args__ = (
+        # Composite index for tenant-scoped time-range queries (analytics dashboard)
+        Index("ix_conversations_tenant_created", "tenant_id", "created_at"),
+        # Composite index for user-scoped time-range queries
+        Index("ix_conversations_user_created", "user_id", "created_at"),
+    )
 
     user_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True

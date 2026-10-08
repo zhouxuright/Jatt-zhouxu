@@ -53,7 +53,7 @@ class Document(Base, UUIDMixin):
         EncryptedText, nullable=True, doc="文书解析摘要（含正文片段），落盘加密",
     )
     upload_time: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True,
     )
 
     # Relationships

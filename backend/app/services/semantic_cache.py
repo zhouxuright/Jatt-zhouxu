@@ -48,17 +48,13 @@ class SemanticCache:
         self._stats: dict[str, int] = {"hits": 0, "misses": 0, "sets": 0}
 
     def _get_redis(self) -> Any:
-        """Get or create async Redis client."""
+        """Get shared Redis client."""
         if self._redis is not None:
             return self._redis
         try:
-            import redis.asyncio as redis_asyncio
-            self._redis = redis_asyncio.from_url(
-                settings.REDIS_URL,
-                max_connections=settings.REDIS_MAX_CONNECTIONS,
-                decode_responses=True,
-            )
-            logger.info("Semantic cache Redis connected: %s", settings.REDIS_URL)
+            from app.core.redis import get_redis
+            self._redis = get_redis()
+            logger.info("Semantic cache: using shared Redis client")
             return self._redis
         except Exception as exc:
             logger.warning("Redis connection failed, semantic cache disabled: %s", exc)

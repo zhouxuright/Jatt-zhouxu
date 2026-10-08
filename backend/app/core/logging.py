@@ -15,9 +15,6 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Callable
-
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -144,20 +141,32 @@ _SKIP_LOG_PREFIXES = (
 )
 
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Log every HTTP request with structured fields: method, path, status, duration, user."""
+class RequestLoggingMiddleware:
+    """Pure ASGI middleware: log every HTTP request with method, path, status, duration, user.
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        path = request.url.path
+    Converted from BaseHTTPMiddleware to avoid anyio cancel scope overhead.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
 
         # Skip noisy / health-check endpoints
         for prefix in _SKIP_LOG_PREFIXES:
             if path == prefix or path.startswith(prefix):
-                return await call_next(request)
+                await self.app(scope, receive, send)
+                return
 
-        # Best-effort user extraction (same logic as audit_log middleware)
+        # Best-effort user extraction from Authorization header
         user_id: str | None = None
-        auth = request.headers.get("authorization", "")
+        headers_dict = dict(scope.get("headers", []))
+        auth = headers_dict.get(b"authorization", b"").decode("latin-1", errors="replace")
         if auth.startswith("Bearer "):
             try:
                 from jose import jwt
@@ -171,24 +180,31 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             except Exception:
                 pass
 
+        method = scope.get("method", "GET")
+        client_ip = scope["client"][0] if scope.get("client") else None
         start = time.perf_counter()
         status_code = 500
+
+        async def send_capture(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status_code", 500)
+            await send(message)
+
         try:
-            response = await call_next(request)
-            status_code = response.status_code
-            return response
+            await self.app(scope, receive, send_capture)
         except Exception:
             status_code = 500
             raise
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
             extra = {
-                "method": request.method,
+                "method": method,
                 "path": path,
                 "status_code": status_code,
                 "duration_ms": duration_ms,
                 "user_id": user_id,
-                "client_ip": request.client.host if request.client else None,
+                "client_ip": client_ip,
             }
 
             log_func = logging.getLogger("app.request")
