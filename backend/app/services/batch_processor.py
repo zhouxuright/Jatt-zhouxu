@@ -174,8 +174,8 @@ class BatchProcessor:
             file_path = file_result.get("_file_path", "")
             filename = file_result.get("filename", "unknown")
 
-            # Update status to processing
-            file_result["status"] = "processing"
+            # Update status to parsing
+            file_result["status"] = "parsing"
             batch_data["status"] = "processing"
             await self._save_batch(batch_id, batch_data)
 
@@ -189,10 +189,11 @@ class BatchProcessor:
                 text = parsed.get("text", "")
 
                 file_result["text"] = text[:10000] if text else ""  # Limit stored text
-                file_result["status"] = "completed"
 
                 # Generate summary for summarize and analyze modes
                 if mode in ("summarize", "analyze") and text:
+                    file_result["status"] = "analyzing"
+                    await self._save_batch(batch_id, batch_data)
                     file_result["summary"] = await self._generate_summary(text)
 
                 # Generate key points for analyze mode
@@ -201,6 +202,7 @@ class BatchProcessor:
 
                 elapsed = time.time() - start_time
                 file_result["processing_time_seconds"] = round(elapsed, 2)
+                file_result["status"] = "completed"
 
                 batch_data["completed_files"] = batch_data.get("completed_files", 0) + 1
 

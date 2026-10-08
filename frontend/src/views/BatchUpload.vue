@@ -65,11 +65,11 @@
         </div>
       </el-card>
 
-      <!-- 处理进度 -->
-      <el-card v-if="batchId" shadow="never" class="progress-card">
+      <!-- 任务队列：整体进度 + 每个文件的状态机（排队/解析中/AI分析中/完成/失败） -->
+      <el-card v-if="batchId" shadow="never" class="queue-card">
         <template #header>
           <div class="card-header">
-            <span class="card-title">处理进度</span>
+            <span class="card-title">任务队列</span>
             <div class="batch-actions">
               <el-tag :type="statusTagType" size="large">{{ statusLabel }}</el-tag>
               <el-button
@@ -100,47 +100,73 @@
             :text-inside="true"
           />
           <div class="progress-stats">
-            <span>总计 {{ batchStatus?.total_files || 0 }} 个文件</span>
-            <span class="stat-completed">已完成 {{ batchStatus?.completed_files || 0 }}</span>
-            <span class="stat-failed" v-if="batchStatus && batchStatus.failed_files > 0">
-              失败 {{ batchStatus.failed_files }}
+            <span>总计 {{ queueStats.total }}</span>
+            <span class="stat-completed">已完成 {{ queueStats.completed }}</span>
+            <span v-if="queueStats.active > 0" class="stat-active">处理中 {{ queueStats.active }}</span>
+            <span v-if="queueStats.queued > 0" class="stat-queued">排队 {{ queueStats.queued }}</span>
+            <span class="stat-failed" v-if="queueStats.failed > 0">
+              失败 {{ queueStats.failed }}
             </span>
           </div>
         </div>
-      </el-card>
 
-      <!-- 文件列表与结果 -->
-      <div v-if="batchId && batchResults.length > 0" class="results-section">
-        <h3 class="results-title">处理结果</h3>
-
-        <el-collapse v-model="expandedCards" class="results-collapse">
-          <el-collapse-item
-            v-for="(result, index) in batchResults"
+        <div class="queue-list">
+          <div
+            v-for="(result, index) in queueItems"
             :key="index"
-            :name="index"
+            class="queue-item"
+            :class="`queue-${fileState(result)}`"
           >
-            <template #title>
-              <div class="result-item-header">
-                <el-icon :size="18" :class="`status-icon status-${result.status}`">
-                  <SuccessFilled v-if="result.status === 'completed'" />
-                  <CircleCloseFilled v-else-if="result.status === 'failed'" />
-                  <Loading v-else />
-                </el-icon>
-                <span class="result-filename">{{ result.filename }}</span>
-                <el-tag
-                  :type="result.status === 'completed' ? 'success' : result.status === 'failed' ? 'danger' : 'warning'"
-                  size="small"
-                >
-                  {{ result.status === 'completed' ? '完成' : result.status === 'failed' ? '失败' : '处理中' }}
-                </el-tag>
-                <span v-if="result.processing_time_seconds" class="processing-time">
-                  {{ result.processing_time_seconds }}s
-                </span>
-              </div>
-            </template>
+            <div
+              class="queue-row"
+              :class="{ clickable: isExpandable(result) }"
+              @click="toggleExpand(index)"
+            >
+              <span class="queue-index">{{ index + 1 }}</span>
+              <el-icon
+                v-if="fileState(result) === 'parsing' || fileState(result) === 'analyzing'"
+                :size="16"
+                class="queue-state-icon is-loading state-active"
+              ><Loading /></el-icon>
+              <el-icon
+                v-else-if="fileState(result) === 'completed'"
+                :size="16"
+                class="queue-state-icon state-completed"
+              ><SuccessFilled /></el-icon>
+              <el-icon
+                v-else-if="fileState(result) === 'failed'"
+                :size="16"
+                class="queue-state-icon state-failed"
+              ><CircleCloseFilled /></el-icon>
+              <el-icon v-else :size="16" class="queue-state-icon state-queued"><Clock /></el-icon>
+              <span class="queue-filename" :title="result.filename">{{ result.filename }}</span>
 
-            <div class="result-content">
-              <!-- Error display -->
+              <div class="queue-steps">
+                <template v-for="(step, si) in queueSteps" :key="step">
+                  <div class="step" :class="stepClass(result, si)">
+                    <span class="step-dot" />
+                  </div>
+                  <span
+                    v-if="si < queueSteps.length - 1"
+                    class="step-line"
+                    :class="{ done: si < stepIndexOf(result) }"
+                  />
+                </template>
+              </div>
+
+              <el-tag :type="stateTagTypes[fileState(result)]" size="small" effect="light">
+                {{ stateLabels[fileState(result)] }}
+              </el-tag>
+              <span v-if="result.processing_time_seconds" class="queue-time">
+                {{ result.processing_time_seconds }}s
+              </span>
+              <el-icon v-if="isExpandable(result)" class="queue-expand-icon">
+                <ArrowDown v-if="expandedCards.includes(index)" />
+                <ArrowRight v-else />
+              </el-icon>
+            </div>
+
+            <div v-if="expandedCards.includes(index)" class="queue-detail">
               <el-alert
                 v-if="result.error"
                 :title="`处理失败: ${result.error}`"
@@ -150,7 +176,6 @@
                 class="result-error"
               />
 
-              <!-- Extracted text -->
               <div v-if="result.text" class="result-block">
                 <div class="block-label">
                   <el-icon><Document /></el-icon>
@@ -170,7 +195,6 @@
                 </el-button>
               </div>
 
-              <!-- Summary -->
               <div v-if="result.summary" class="result-block">
                 <div class="block-label">
                   <el-icon><Notebook /></el-icon>
@@ -179,7 +203,6 @@
                 <div class="block-content summary-content">{{ result.summary }}</div>
               </div>
 
-              <!-- Key points -->
               <div v-if="result.key_points" class="result-block">
                 <div class="block-label">
                   <el-icon><Star /></el-icon>
@@ -192,9 +215,9 @@
                 </div>
               </div>
             </div>
-          </el-collapse-item>
-        </el-collapse>
-      </div>
+          </div>
+        </div>
+      </el-card>
 
       <!-- 处理历史 -->
       <el-card v-if="!batchId" shadow="never" class="history-card">
@@ -261,6 +284,9 @@ import {
   SuccessFilled,
   CircleCloseFilled,
   Loading,
+  Clock,
+  ArrowDown,
+  ArrowRight,
   Document,
   Notebook,
   Star,
@@ -294,6 +320,96 @@ const historyTotal = ref(0)
 
 // Polling
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+// --- Task queue state machine ---
+// 后端逐文件状态：pending → parsing → analyzing（仅摘要/分析模式）→ completed / failed
+type QueueState = 'queued' | 'parsing' | 'analyzing' | 'completed' | 'failed'
+
+const stateLabels: Record<QueueState, string> = {
+  queued: '排队中',
+  parsing: '解析中',
+  analyzing: 'AI 分析中',
+  completed: '已完成',
+  failed: '失败',
+}
+
+const stateTagTypes: Record<QueueState, string> = {
+  queued: 'info',
+  parsing: 'warning',
+  analyzing: 'warning',
+  completed: 'success',
+  failed: 'danger',
+}
+
+function fileState(result: FileResult): QueueState {
+  switch (result.status) {
+    case 'completed': return 'completed'
+    case 'failed': return 'failed'
+    case 'parsing': return 'parsing'
+    case 'analyzing': return 'analyzing'
+    case 'processing': return 'parsing' // 兼容旧批次状态
+    default: return 'queued'
+  }
+}
+
+const queueItems = computed<FileResult[]>(() => {
+  if (batchStatus.value?.results?.length) return batchStatus.value.results
+  return batchResults.value
+})
+
+const queueSteps = computed<string[]>(() =>
+  batchStatus.value?.mode === 'extract'
+    ? ['排队', '解析', '完成']
+    : ['排队', '解析', 'AI 分析', '完成'],
+)
+
+function stepIndexOf(result: FileResult): number {
+  const state = fileState(result)
+  const extract = batchStatus.value?.mode === 'extract'
+  switch (state) {
+    case 'queued': return 0
+    case 'parsing': return 1
+    case 'analyzing': return 2
+    case 'completed':
+    case 'failed': return extract ? 2 : 3
+  }
+}
+
+function stepClass(result: FileResult, si: number): string {
+  const state = fileState(result)
+  const current = stepIndexOf(result)
+  if (state === 'failed' && si === current) return 'step-failed'
+  if (si < current) return 'step-done'
+  if (si === current) return 'step-current'
+  return ''
+}
+
+const queueStats = computed(() => {
+  const stats = { total: 0, queued: 0, active: 0, completed: 0, failed: 0 }
+  for (const it of queueItems.value) {
+    const s = fileState(it)
+    stats.total++
+    if (s === 'completed') stats.completed++
+    else if (s === 'failed') stats.failed++
+    else if (s === 'queued') stats.queued++
+    else stats.active++
+  }
+  return stats
+})
+
+function isExpandable(result: FileResult): boolean {
+  const s = fileState(result)
+  return s === 'completed' || s === 'failed'
+}
+
+function toggleExpand(index: number) {
+  const i = expandedCards.value.indexOf(index)
+  if (i >= 0) {
+    expandedCards.value.splice(i, 1)
+  } else {
+    expandedCards.value.push(index)
+  }
+}
 
 // --- Computed ---
 const statusTagType = computed(() => {
@@ -397,10 +513,9 @@ async function fetchResults() {
   try {
     const res = await batchApi.getBatchResults(batchId.value)
     batchResults.value = res.data.results || []
-    // Auto-expand completed results
-    expandedCards.value = batchResults.value
-      .map((_, i) => i)
-      .filter((i) => batchResults.value[i].status === 'completed')
+    // 展开第一个已完成的条目，便于用户直接看到结果样例
+    const firstCompleted = batchResults.value.findIndex((r) => r.status === 'completed')
+    expandedCards.value = firstCompleted >= 0 ? [firstCompleted] : []
   } catch {
     // Error handled by interceptor
   }
@@ -565,7 +680,7 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.progress-card {
+.queue-card {
   margin-bottom: 24px;
 }
 
@@ -585,6 +700,14 @@ onUnmounted(() => {
   color: var(--el-color-success);
 }
 
+.stat-active {
+  color: var(--el-color-warning);
+}
+
+.stat-queued {
+  color: var(--text-secondary);
+}
+
 .stat-failed {
   color: var(--el-color-danger);
 }
@@ -595,52 +718,150 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.results-section {
-  margin-bottom: 24px;
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
 }
 
-.results-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--primary-color);
-  margin: 0 0 12px 0;
+.queue-item {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color 0.2s;
 }
 
-.result-item-header {
+.queue-item.queue-completed {
+  border-color: var(--el-color-success-light-7, #e1f3d8);
+}
+
+.queue-item.queue-failed {
+  border-color: var(--el-color-danger-light-7, #fde2e2);
+}
+
+.queue-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-white);
 }
 
-.result-filename {
+.queue-row.clickable {
+  cursor: pointer;
+}
+
+.queue-row.clickable:hover {
+  background: var(--bg-color);
+}
+
+.queue-index {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.queue-state-icon {
+  flex-shrink: 0;
+}
+
+.queue-state-icon.state-completed {
+  color: var(--el-color-success);
+}
+
+.queue-state-icon.state-failed {
+  color: var(--el-color-danger);
+}
+
+.queue-state-icon.state-active {
+  color: var(--el-color-warning);
+}
+
+.queue-state-icon.state-queued {
+  color: var(--text-secondary);
+}
+
+.queue-filename {
   font-size: 14px;
   font-weight: 500;
+  color: var(--text-primary);
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.processing-time {
+.queue-steps {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+}
+
+.step-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border-color);
+  transition: background 0.3s;
+}
+
+.step-done .step-dot {
+  background: var(--el-color-success);
+}
+
+.step-current .step-dot {
+  background: var(--el-color-warning);
+  animation: step-pulse 1.5s ease-in-out infinite;
+}
+
+.step-failed .step-dot {
+  background: var(--el-color-danger);
+}
+
+.step-line {
+  width: 16px;
+  height: 2px;
+  background: var(--border-color);
+  margin: 0 2px;
+}
+
+.step-line.done {
+  background: var(--el-color-success);
+}
+
+@keyframes step-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(230, 162, 60, 0.25); }
+  50% { box-shadow: 0 0 0 6px rgba(230, 162, 60, 0.08); }
+}
+
+.queue-time {
   font-size: 12px;
   color: var(--text-secondary);
+  flex-shrink: 0;
+  min-width: 36px;
+  text-align: right;
 }
 
-.status-icon.status-completed {
-  color: var(--el-color-success);
+.queue-expand-icon {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
-.status-icon.status-failed {
-  color: var(--el-color-danger);
-}
-
-.status-icon.status-processing {
-  color: var(--el-color-warning);
-}
-
-.result-content {
-  padding: 12px 0;
+.queue-detail {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-white);
 }
 
 .result-error {
@@ -710,6 +931,14 @@ onUnmounted(() => {
   }
 
   .mode-selector {
+    flex-wrap: wrap;
+  }
+
+  .queue-steps {
+    display: none;
+  }
+
+  .queue-row {
     flex-wrap: wrap;
   }
 }
