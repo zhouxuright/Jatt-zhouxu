@@ -13,8 +13,19 @@
       </el-button>
     </div>
 
+    <!-- 非管理员提示：该页面所有接口均需要 admin 角色 -->
+    <el-alert
+      v-if="!isAdmin"
+      title="需要平台管理员权限"
+      description="数据资产治理台账、合规审计日志与租户隔离信息仅对平台管理员开放。请使用管理员账号登录后查看。"
+      type="warning"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 16px"
+    />
+
     <!-- 概览卡片 -->
-    <el-row :gutter="16" class="stat-row">
+    <el-row v-if="isAdmin" :gutter="16" class="stat-row">
       <el-col :xs="24" :sm="12" :md="6">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-label">可援引权威语料</div>
