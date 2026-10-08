@@ -301,17 +301,32 @@ async def review_contract(
     # Map risk items to the response schema
     risks: list[RiskItem] = []
     for item in risk_items_raw:
+        # Strip markdown formatting from LLM-generated text fields
+        # so the frontend doesn't display raw symbols like #, *, -, **
+        description = item.get("risk_description", "")
+        suggestion = item.get("suggestion", "")
+        clause = item.get("clause_text", "")
+
+        # Try to use the agent's markdown stripper if available
+        try:
+            agent = get_contract_review_agent()
+            description = agent._strip_markdown(description)
+            suggestion = agent._strip_markdown(suggestion)
+            clause = agent._strip_markdown(clause)
+        except Exception:
+            pass
+
         risk = RiskItem(
             risk_level=item.get("risk_level", "low"),
             category=item.get("risk_category", "unknown"),
-            clause=item.get("clause_text", "")[:500],
-            description=item.get("risk_description", "")[:500],
-            suggestion=item.get("suggestion", "")
+            clause=clause[:500],
+            description=description[:500],
+            suggestion=suggestion
             or "请根据相关法律法规审查该条款的具体内容。",
         )
         risks.append(risk)
 
-    # Build summary
+    # Build summary — strip markdown from LLM-generated report
     if report:
         summary = report[:1000]
     else:
@@ -321,6 +336,13 @@ async def review_contract(
             f"识别风险项：{len(risks)}条，"
             f"缺失条款：{len(missing_clauses)}项。"
         )
+
+    # Clean markdown symbols from summary (LLM output often contains #, *, -, etc.)
+    try:
+        agent = get_contract_review_agent()
+        summary = agent._strip_markdown(summary)
+    except Exception:
+        pass
 
     # Apply AI content identification watermark (人工智能生成合成内容标识办法)
     watermark_service = get_content_watermark_service()

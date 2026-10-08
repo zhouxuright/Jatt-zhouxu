@@ -298,12 +298,38 @@ async def execute_contract_review(task_id: str, contract_text: str, review_type:
             progress_message="正在生成审查报告...",
         )
 
-        # Build structured result
+        # Build structured result — clean markdown from all LLM-generated text
         risk_score = result.get("risk_score", 0)
         risk_level = result.get("risk_level", "low")
         risk_items = result.get("risk_items", [])
         report = result.get("report", "")
         missing_clauses = result.get("missing_clauses", [])
+
+        # Strip markdown symbols from risk item text fields
+        try:
+            from app.agents.contract_review_agent import ContractReviewAgent
+            _strip = ContractReviewAgent._strip_markdown
+            for item in risk_items:
+                for key in ("risk_description", "suggestion", "clause_text",
+                            "risk_category", "legal_basis", "alternative"):
+                    if item.get(key):
+                        item[key] = _strip(item[key])
+        except Exception:
+            pass
+
+        # Build summary and strip markdown
+        summary = (
+            report[:1000] if report else
+            f"合同审查完成。综合风险等级：{risk_level}，"
+            f"风险评分：{risk_score}/100，"
+            f"识别风险项：{len(risk_items)}条，"
+            f"缺失条款：{len(missing_clauses)}项。"
+        )
+        try:
+            from app.agents.contract_review_agent import ContractReviewAgent
+            summary = ContractReviewAgent._strip_markdown(summary)
+        except Exception:
+            pass
 
         review_result = {
             "risk_score": risk_score,
@@ -311,13 +337,7 @@ async def execute_contract_review(task_id: str, contract_text: str, review_type:
             "risk_items": risk_items,
             "report": report,
             "missing_clauses": missing_clauses,
-            "summary": (
-                report[:1000] if report else
-                f"合同审查完成。综合风险等级：{risk_level}，"
-                f"风险评分：{risk_score}/100，"
-                f"识别风险项：{len(risk_items)}条，"
-                f"缺失条款：{len(missing_clauses)}项。"
-            ),
+            "summary": summary,
         }
 
         # 落库：异步接口此前只把结果写到 Redis，不写 contract_reviews，

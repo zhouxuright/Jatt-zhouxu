@@ -326,6 +326,59 @@ class ContractReviewAgent(BaseAgent[ContractReviewState]):
         }
 
     @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Remove markdown formatting symbols from LLM output text.
+
+        Strips: #, *, -, **, __, `, >, |, -, bullet markers, and other
+        common markdown syntax that DeepSeek/LLM models emit.
+        Preserves the actual text content.
+        """
+        if not text:
+            return text
+
+        lines = text.splitlines()
+        cleaned_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Skip pure markdown table separator lines like |---|---|
+            if re.match(r'^[\|\s\-:]+$', stripped) and stripped.count('-') >= 2:
+                continue
+
+            # Remove leading markdown heading markers: ## Title → Title
+            stripped = re.sub(r'^#{1,6}\s+', '', stripped)
+
+            # Remove bold/italic markers: **text** → text, *text* → text
+            stripped = re.sub(r'\*\*(.+?)\*\*', r'\1', stripped)
+            stripped = re.sub(r'\*(.+?)\*', r'\1', stripped)
+            stripped = re.sub(r'__(.+?)__', r'\1', stripped)
+            stripped = re.sub(r'_(.+?)_', r'\1', stripped)
+
+            # Remove inline code: `code` → code
+            stripped = re.sub(r'`(.+?)`', r'\1', stripped)
+
+            # Remove blockquote markers: > text → text
+            stripped = re.sub(r'^>\s*', '', stripped)
+
+            # Remove bullet list markers: - item → item, * item → item
+            stripped = re.sub(r'^[\-\*]\s+', '', stripped)
+
+            # Remove numbered list markers: 1. item → item (keep the text)
+            stripped = re.sub(r'^\d+\.\s+', '', stripped)
+
+            # Remove leading/trailing pipe characters from table rows
+            stripped = stripped.strip('|').strip()
+
+            # Collapse multiple spaces
+            stripped = re.sub(r'  +', ' ', stripped)
+
+            if stripped:
+                cleaned_lines.append(stripped)
+
+        return '\n'.join(cleaned_lines).strip()
+
+    @staticmethod
     def _parse_risk_analysis(content: str) -> dict[str, str]:
         """把 LLM 的风险分析文本解析成结构化字段。
 

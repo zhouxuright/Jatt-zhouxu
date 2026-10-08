@@ -68,7 +68,7 @@
             </el-progress>
             <div>
               <h3>合同风险评分</h3>
-              <p class="summary-text">{{ result.summary }}</p>
+              <p class="summary-text" style="white-space: pre-line;">{{ result.summary }}</p>
             </div>
           </div>
         </div>
@@ -123,12 +123,12 @@
                 </div>
                 <div class="compare-col compare-suggestion">
                   <label>修订建议</label>
-                  <p>{{ item.suggestion || '（无修改建议）' }}</p>
+                  <p style="white-space: pre-line;">{{ item.suggestion || '（无修改建议）' }}</p>
                 </div>
               </div>
               <div class="risk-description">
                 <label>风险分析</label>
-                <p>{{ item.description }}</p>
+                <p style="white-space: pre-line;">{{ item.description }}</p>
               </div>
             </div>
           </div>
