@@ -48,6 +48,21 @@ def _get_http_client() -> httpx.AsyncClient:
 
 _llm_semaphore = asyncio.Semaphore(20)
 
+
+def _format_exc(exc: Exception) -> str:
+    """Include the exception type so empty-message errors stay diagnosable.
+
+    httpx 连接层异常（如 SSL EOF、连接重置）的 str() 经常为空，
+    只记 str(exc) 会让日志里出现 "Provider 'deepseek' failed: " 这种无法排查的行。
+    """
+    msg = str(exc).strip()
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
+
+def _is_transient(exc: Exception) -> bool:
+    """连接层瞬时故障（网络抖动、TLS 重置、超时）值得重试一次。"""
+    return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
+
 # Approximate cost per 1K tokens (USD)
 COST_PER_1K = {
     "deepseek-chat": {"input": 0.00014, "output": 0.00028},
@@ -148,26 +163,35 @@ class LLMService:
             RuntimeError: If all providers fail.
         """
         providers = [provider] if provider else self.provider_order
-        last_error: Exception | None = None
+        errors: list[str] = []
 
         for provider_name in providers:
-            try:
-                result = await self._chat_provider(
-                    provider_name=provider_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    model=model,
-                    **kwargs,
-                )
-                self._request_count += 1
-                return result
-            except Exception as exc:
-                logger.warning("Provider '%s' failed: %s", provider_name, exc)
-                last_error = exc
-                continue
+            for attempt in range(2):
+                try:
+                    result = await self._chat_provider(
+                        provider_name=provider_name,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        model=model,
+                        **kwargs,
+                    )
+                    self._request_count += 1
+                    return result
+                except Exception as exc:
+                    err_text = _format_exc(exc)
+                    if _is_transient(exc) and attempt == 0:
+                        logger.warning(
+                            "Provider '%s' failed (attempt %d/2): %s — retrying in 2s",
+                            provider_name, attempt + 1, err_text,
+                        )
+                        await asyncio.sleep(2)
+                        continue
+                    logger.warning("Provider '%s' failed: %s", provider_name, err_text)
+                    errors.append(f"{provider_name}: {err_text}")
+                    break
 
-        raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
+        raise RuntimeError("All LLM providers failed. Errors: " + "; ".join(errors))
 
     async def chat_with_fallback(
         self,
@@ -243,27 +267,38 @@ class LLMService:
             Text chunks from the streaming response.
         """
         providers = [provider] if provider else self.provider_order
-        last_error: Exception | None = None
+        errors: list[str] = []
 
         for provider_name in providers:
-            try:
-                async for chunk in self._chat_stream_provider(
-                    provider_name=provider_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    model=model,
-                    **kwargs,
-                ):
-                    yield chunk
-                self._request_count += 1
-                return
-            except Exception as exc:
-                logger.warning("Provider '%s' streaming failed: %s", provider_name, exc)
-                last_error = exc
-                continue
+            for attempt in range(2):
+                try:
+                    async for chunk in self._chat_stream_provider(
+                        provider_name=provider_name,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        model=model,
+                        **kwargs,
+                    ):
+                        yield chunk
+                    self._request_count += 1
+                    return
+                except Exception as exc:
+                    err_text = _format_exc(exc)
+                    if _is_transient(exc) and attempt == 0:
+                        logger.warning(
+                            "Provider '%s' streaming failed (attempt %d/2): %s — retrying in 2s",
+                            provider_name, attempt + 1, err_text,
+                        )
+                        await asyncio.sleep(2)
+                        continue
+                    logger.warning("Provider '%s' streaming failed: %s", provider_name, err_text)
+                    errors.append(f"{provider_name}: {err_text}")
+                    break
 
-        raise RuntimeError(f"All LLM providers failed for streaming. Last error: {last_error}")
+        raise RuntimeError(
+            "All LLM providers failed for streaming. Errors: " + "; ".join(errors)
+        )
 
     async def _chat_provider(
         self,
