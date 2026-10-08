@@ -112,10 +112,10 @@ async def get_dashboard_stats(
 ) -> DashboardStatResponse:
     """Aggregate counts from all legal tables and user activity stats.
 
-    Runs lightweight COUNT queries in parallel via asyncio.gather for
-    acceptable response times even with large tables.
+    Runs lightweight COUNT queries sequentially — SQLAlchemy AsyncSession
+    is NOT safe for concurrent use from multiple coroutines (shared
+    connection), so asyncio.gather would cause 500 errors.
     """
-    import asyncio
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -125,31 +125,18 @@ async def get_dashboard_stats(
         result = await db.execute(stmt)
         return result.scalar() or 0
 
-    # Run all COUNT queries in parallel instead of sequentially
-    (
-        total_laws,
-        total_articles,
-        total_court_cases,
-        total_qa_pairs,
-        total_conversations,
-        total_messages,
-        total_reviews,
-        total_documents,
-        daily_conversations,
-        daily_messages,
-    ) = await asyncio.gather(
-        _count(select(func.count(Law.id))),
-        _count(select(func.count(LegalArticle.id))),
-        _count(select(func.count(CourtCase.id))),
-        _count(select(func.count(LegalQAPair.id))),
-        _count(select(func.count(Conversation.id))),
-        _count(select(func.count(Message.id))),
-        _count(select(func.count(ContractReview.id))),
-        _count(select(func.count(Document.id))),
-        _count(select(func.count(Conversation.id)).where(Conversation.created_at >= today_start)),
-        _count(select(func.count(Message.id)).where(Message.created_at >= today_start)),
-    )
+    # Knowledge base counts (sequential — session is not concurrency-safe)
+    total_laws = await _count(select(func.count(Law.id)))
+    total_articles = await _count(select(func.count(LegalArticle.id)))
+    total_court_cases = await _count(select(func.count(CourtCase.id)))
+    total_qa_pairs = await _count(select(func.count(LegalQAPair.id)))
     knowledge_total = total_laws + total_articles + total_court_cases + total_qa_pairs
+
+    # User activity
+    total_conversations = await _count(select(func.count(Conversation.id)))
+    total_messages = await _count(select(func.count(Message.id)))
+    total_reviews = await _count(select(func.count(ContractReview.id)))
+    total_documents = await _count(select(func.count(Document.id)))
 
     # Feedback (single query with both count and avg)
     feedback_result = await db.execute(
@@ -161,6 +148,16 @@ async def get_dashboard_stats(
     fb_row = feedback_result.one_or_none()
     feedback_count = fb_row[0] if fb_row else 0
     avg_feedback = float(fb_row[1]) if fb_row and fb_row[1] else 0.0
+
+    # Daily stats
+    daily_conversations = await _count(
+        select(func.count(Conversation.id))
+        .where(Conversation.created_at >= today_start)
+    )
+    daily_messages = await _count(
+        select(func.count(Message.id))
+        .where(Message.created_at >= today_start)
+    )
 
     return DashboardStatResponse(
         total_laws=total_laws,

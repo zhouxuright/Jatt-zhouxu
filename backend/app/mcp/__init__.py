@@ -865,6 +865,415 @@ class LegalCalculatorTool(MCPTool):
 
 
 # =============================================================================
+# New MCP Tools (Phase 2 expansion)
+# =============================================================================
+
+class LimitationCalculatorTool(MCPTool):
+    """诉讼时效计算工具 — 根据《民法典》计算各类请求权的诉讼时效届满日。"""
+
+    name = "limitation_calculator"
+    description = (
+        "诉讼时效计算器：根据《民法典》计算各类请求权的诉讼时效期间及届满日期。"
+        "支持普通诉讼时效(3年)、国际货物买卖合同(4年)、人身损害(3年)等。"
+        "输入起始日期和时效类型，返回届满日期、是否已过时效、剩余天数。"
+    )
+    category = "utility"
+    version = "1.0.0"
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter("start_date", "string", "时效起算日期，格式 YYYY-MM-DD"),
+            ToolParameter("case_type", "string",
+                          "案件类型: general(普通3年), international(国际货物买卖4年), "
+                          "personal_injury(人身损害3年), product_liability(产品责任2年), "
+                          "labor_dispute(劳动争议1年), environmental(环境污染3年)"),
+        ]
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        from datetime import datetime, timedelta
+        start = kwargs.get("start_date", "")
+        case_type = kwargs.get("case_type", "general")
+        periods = {
+            "general": (3, "普通诉讼时效（《民法典》第188条）"),
+            "international": (4, "国际货物买卖合同时效"),
+            "personal_injury": (3, "人身损害赔偿时效"),
+            "product_liability": (2, "产品责任时效"),
+            "labor_dispute": (1, "劳动争议仲裁时效（《劳动争议调解仲裁法》第27条）"),
+            "environmental": (3, "环境污染损害赔偿时效"),
+        }
+        years, rule = periods.get(case_type, periods["general"])
+        try:
+            start_dt = datetime.strptime(start, "%Y-%m-%d")
+        except ValueError:
+            return ToolResult(success=False, error="日期格式错误，请使用 YYYY-MM-DD")
+        end_dt = start_dt.replace(year=start_dt.year + years)
+        today = datetime.now()
+        remaining = (end_dt - today).days
+        return ToolResult(success=True, data={
+            "start_date": start,
+            "limitation_years": years,
+            "limitation_rule": rule,
+            "expiration_date": end_dt.strftime("%Y-%m-%d"),
+            "is_expired": remaining < 0,
+            "remaining_days": max(remaining, 0),
+            "suspension_note": "注意：存在时效中止/中断情形时，实际届满日可能不同",
+        })
+
+
+class LitigationCostCalculatorTool(MCPTool):
+    """诉讼费用计算器 — 根据《诉讼费用交纳办法》计算案件受理费。"""
+
+    name = "litigation_cost_calculator"
+    description = (
+        "诉讼费用计算器：根据《诉讼费用交纳办法》计算案件受理费。"
+        "输入争议标的金额，自动按阶梯费率计算，支持财产案件、非财产案件、"
+        "知识产权案件等类型。返回受理费、减半金额（简易程序）、保全费参考。"
+    )
+    category = "utility"
+    version = "1.0.0"
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter("amount", "number", "争议标的金额（人民币元）"),
+            ToolParameter("case_type", "string",
+                          "案件类型: property(财产案件), non_property(非财产案件), "
+                          "ip(知识产权案件), labor(劳动争议10元/件)", required=False,
+                          default="property"),
+        ]
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        amount = float(kwargs.get("amount", 0))
+        case_type = kwargs.get("case_type", "property")
+        if amount < 0:
+            return ToolResult(success=False, error="标的金额不能为负数")
+        if case_type == "labor":
+            return ToolResult(success=True, data={
+                "case_type": "劳动争议", "amount": amount,
+                "filing_fee": 10, "half_fee": 5,
+                "note": "劳动争议案件每件交纳10元",
+            })
+        if case_type == "non_property":
+            return ToolResult(success=True, data={
+                "case_type": "非财产案件", "amount": amount,
+                "filing_fee": 300, "half_fee": 150,
+                "note": "非财产案件定额交纳300元",
+            })
+        # 财产案件阶梯费率（《诉讼费用交纳办法》第13条）
+        tiers = [
+            (10000, 50, 0),          # ≤1万: 50元
+            (100000, 0.025, -150),    # 1-10万: 2.5% - 150
+            (200000, 0.02, -100),     # 10-20万: 2% - 100 (actually 50+2250=2300)
+            (500000, 0.015, 0),       # 20-50万: 1.5%
+            (1000000, 0.01, 1000),    # 50-100万: 1% + 1000
+            (2000000, 0.009, 1900),   # 100-200万: 0.9% + 1900
+            (5000000, 0.008, 3900),   # 200-500万: 0.8% + 3900
+            (10000000, 0.007, 8900),  # 500-1000万: 0.7% + 8900
+            (20000000, 0.006, 18900), # 1000-2000万: 0.6% + 18900
+            (float("inf"), 0.005, 38900),  # >2000万: 0.5% + 38900
+        ]
+        fee = 50.0
+        for upper, rate, adjust in tiers:
+            if amount <= upper:
+                fee = amount * rate + adjust
+                break
+        fee = max(fee, 50)
+        return ToolResult(success=True, data={
+            "case_type": "财产案件", "amount": amount,
+            "filing_fee": round(fee, 2),
+            "half_fee": round(fee / 2, 2),
+            "preservation_fee": round(min(amount * 0.005, 5000), 2),
+            "note": "适用简易程序减半交纳；保全费不超过5000元",
+        })
+
+
+class ContractRiskCheckerTool(MCPTool):
+    """合同风险速查工具 — 快速检查合同文本中的常见高风险条款。"""
+
+    name = "contract_risk_checker"
+    description = (
+        "合同风险速查：快速扫描合同文本中的常见高风险条款模式，"
+        "包括：违约金过高、管辖权不利、自动续约陷阱、免责条款过宽、"
+        "知识产权归属不明等。返回风险清单及修改建议。"
+    )
+    category = "contract"
+    version = "1.0.0"
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter("contract_text", "string", "合同文本内容（前5000字）"),
+        ]
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        text = kwargs.get("contract_text", "")[:5000]
+        if not text.strip():
+            return ToolResult(success=False, error="合同文本不能为空")
+        risks = []
+        patterns = [
+            ("自动续约", ["自动续约", "自动续期", "自动延长"],
+             "合同包含自动续约条款，注意续约条件和退出机制"),
+            ("违约金过高", ["违约金.*每日.*%", "违约金.*合同总价"],
+             "违约金条款可能过高，根据《民法典》第585条，超过实际损失30%可请求法院适当减少"),
+            ("单方解除权", ["甲方有权.*单方解除", "有权.*随时解除"],
+             "一方享有单方解除权，可能导致合同不稳定"),
+            ("免责过宽", ["不承担任何责任", "概不负责", "免除.*全部责任"],
+             "免责条款过宽，根据《民法典》第506条，造成对方人身损害和故意/重大过失造成财产损失的免责条款无效"),
+            ("知识产权归属", ["知识产权.*归.*所有", "著作权.*归属"],
+             "知识产权归属条款需要明确约定，避免纠纷"),
+            ("竞业限制", ["竞业限制", "竞业禁止", "不得从事"],
+             "竞业限制条款需注意期限不超过2年（《劳动合同法》第24条），且需支付经济补偿"),
+            ("管辖权", ["仲裁", "管辖法院", "争议解决"],
+             "注意管辖权/仲裁条款，选择对己方有利的争议解决方式"),
+            ("保证金", ["保证金", "押金", "定金"],
+             "保证金/定金条款需明确退还条件和期限"),
+        ]
+        for name, keywords, suggestion in patterns:
+            found = False
+            for kw in keywords:
+                if re.search(kw, text):
+                    found = True
+                    break
+            if found:
+                risks.append({
+                    "risk_category": name,
+                    "risk_level": "high" if name in ("违约金过高", "免责过宽") else "medium",
+                    "suggestion": suggestion,
+                })
+        return ToolResult(success=True, data={
+            "total_risks_found": len(risks),
+            "risks": risks,
+            "scanned_chars": len(text),
+        })
+
+
+class EvidenceChecklistTool(MCPTool):
+    """证据清单生成工具 — 根据案件类型生成所需证据清单。"""
+
+    name = "evidence_checklist"
+    description = (
+        "证据清单生成器：根据案件类型自动生成所需的证据清单模板，"
+        "包括书证、物证、证人证言、电子数据等。覆盖劳动争议、合同纠纷、"
+        "侵权责任、婚姻家事、知识产权等常见案件类型。"
+    )
+    category = "litigation"
+    version = "1.0.0"
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter("case_type", "string",
+                          "案件类型: labor_dispute(劳动争议), contract(合同纠纷), "
+                          "tort(侵权), marriage(婚姻家事), ip(知识产权), "
+                          "consumer(消费维权)"),
+            ToolParameter("description", "string", "案件简要描述（可选）",
+                          required=False, default=""),
+        ]
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        case_type = kwargs.get("case_type", "contract")
+        checklists = {
+            "labor_dispute": {
+                "case_type": "劳动争议",
+                "items": [
+                    {"category": "劳动关系证明", "evidence": "劳动合同/聘用协议", "priority": "必须"},
+                    {"category": "劳动关系证明", "evidence": "工资条/银行流水", "priority": "必须"},
+                    {"category": "劳动关系证明", "evidence": "社保缴纳记录", "priority": "必须"},
+                    {"category": "劳动关系证明", "evidence": "工牌/工作证", "priority": "建议"},
+                    {"category": "考勤记录", "evidence": "打卡记录/考勤表", "priority": "必须"},
+                    {"category": "考勤记录", "evidence": "加班审批单", "priority": "如有"},
+                    {"category": "解除关系", "evidence": "解除/终止劳动合同通知书", "priority": "必须"},
+                    {"category": "解除关系", "evidence": "辞退邮件/微信记录", "priority": "如有"},
+                    {"category": "工资争议", "evidence": "工资发放记录（至少12个月）", "priority": "必须"},
+                    {"category": "工资争议", "evidence": "年终奖/绩效约定", "priority": "如有"},
+                ],
+            },
+            "contract": {
+                "case_type": "合同纠纷",
+                "items": [
+                    {"category": "合同文本", "evidence": "合同原件/复印件", "priority": "必须"},
+                    {"category": "合同文本", "evidence": "补充协议/变更协议", "priority": "如有"},
+                    {"category": "履行证据", "evidence": "付款凭证/发票", "priority": "必须"},
+                    {"category": "履行证据", "evidence": "交货/验收记录", "priority": "必须"},
+                    {"category": "违约证据", "evidence": "催告函/律师函", "priority": "建议"},
+                    {"category": "违约证据", "evidence": "往来邮件/微信聊天记录", "priority": "必须"},
+                    {"category": "损失证明", "evidence": "损失计算依据", "priority": "必须"},
+                    {"category": "损失证明", "evidence": "第三方评估报告", "priority": "建议"},
+                ],
+            },
+            "tort": {
+                "case_type": "侵权责任",
+                "items": [
+                    {"category": "侵权事实", "evidence": "现场照片/视频", "priority": "必须"},
+                    {"category": "侵权事实", "evidence": "报警记录/出警记录", "priority": "如有"},
+                    {"category": "损害后果", "evidence": "医院诊断证明/病历", "priority": "必须"},
+                    {"category": "损害后果", "evidence": "伤残鉴定报告", "priority": "如有"},
+                    {"category": "损害后果", "evidence": "医疗费/误工费票据", "priority": "必须"},
+                    {"category": "因果关系", "evidence": "司法鉴定意见", "priority": "建议"},
+                    {"category": "身份信息", "evidence": "侵权人身份信息", "priority": "必须"},
+                    {"category": "证人证言", "evidence": "目击者联系方式及证言", "priority": "建议"},
+                ],
+            },
+        }
+        checklist = checklists.get(case_type, checklists["contract"])
+        return ToolResult(success=True, data=checklist)
+
+
+class LegalTermDictionaryTool(MCPTool):
+    """法律术语词典 — 解释常见法律术语的含义和适用场景。"""
+
+    name = "legal_term_dictionary"
+    description = (
+        "法律术语词典：查询常见法律术语的含义、法律依据和适用场景。"
+        "覆盖民法、刑法、行政法、诉讼法等领域的核心术语。"
+        "帮助用户理解法律文书中的专业用语。"
+    )
+    category = "knowledge"
+    version = "1.0.0"
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter("term", "string", "要查询的法律术语"),
+        ]
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        term = kwargs.get("term", "").strip()
+        if not term:
+            return ToolResult(success=False, error="请输入要查询的法律术语")
+        dictionary = {
+            "不可抗力": {
+                "definition": "不能预见、不能避免且不能克服的客观情况",
+                "legal_basis": "《民法典》第180条、第590条",
+                "examples": "自然灾害（地震、洪水）、战争、政府行为、疫情等",
+                "effect": "因不可抗力不能履行民事义务的，不承担民事责任。部分或全部免责。",
+            },
+            "善意取得": {
+                "definition": "无权处分人将不动产或动产转让给受让人，受让人善意且以合理价格取得，可取得所有权",
+                "legal_basis": "《民法典》第311条",
+                "examples": "甲将借用乙的电脑卖给不知情的丙，丙以市场价购买",
+                "effect": "受让人取得所有权，原所有权人有权向无权处分人请求损害赔偿",
+            },
+            "诉讼时效": {
+                "definition": "权利人在法定期间内不行使权利，义务人获得抗辩权的法律制度",
+                "legal_basis": "《民法典》第188条（普通3年）、第189-199条",
+                "examples": "借款到期后3年内未主张还款，债务人可主张时效抗辩",
+                "effect": "时效届满后，权利人丧失胜诉权，但实体权利不消灭",
+            },
+            "定金": {
+                "definition": "当事人为确保合同履行，一方预先支付给对方的一定数额的金钱",
+                "legal_basis": "《民法典》第586-588条",
+                "examples": "购房定金、订金（注意：订金≠定金）",
+                "effect": "给付方违约无权请求返还；收受方违约应双倍返还。定金不超过主合同标的额20%",
+            },
+            "保全": {
+                "definition": "法院为保证判决执行或避免当事人合法权益受损，对财产或行为采取的强制措施",
+                "legal_basis": "《民事诉讼法》第100-108条",
+                "examples": "诉前财产保全、诉中财产保全、行为保全",
+                "effect": "查封、扣押、冻结被申请人财产，保全费由败诉方承担",
+            },
+            "管辖权异议": {
+                "definition": "当事人认为受诉法院对案件无管辖权，在答辩期内提出的异议",
+                "legal_basis": "《民事诉讼法》第127条",
+                "examples": "被告在收到起诉状副本15日内提出",
+                "effect": "法院审查后裁定异议成立则移送，不成立则驳回，可上诉",
+            },
+        }
+        # 精确匹配
+        if term in dictionary:
+            return ToolResult(success=True, data={"term": term, **dictionary[term]})
+        # 模糊匹配
+        matches = {k: v for k, v in dictionary.items() if term in k or k in term}
+        if matches:
+            return ToolResult(success=True, data={
+                "term": term, "matched_terms": list(matches.keys()),
+                "results": list(matches.values()),
+            })
+        return ToolResult(success=True, data={
+            "term": term,
+            "message": f"未找到'{term}'的词条，建议尝试：{', '.join(dictionary.keys())}",
+        })
+
+
+class CourtJurisdictionTool(MCPTool):
+    """法院管辖权查询工具 — 根据案件类型和地点确定管辖法院。"""
+
+    name = "court_jurisdiction"
+    description = (
+        "法院管辖权查询：根据案件类型（民事、刑事、行政、劳动）和当事人所在地，"
+        "确定有管辖权的法院。覆盖级别管辖、地域管辖、专属管辖规则。"
+        "帮助确定应向哪个法院起诉。"
+    )
+    category = "litigation"
+    version = "1.0.0"
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter("case_type", "string",
+                          "案件类型: civil(民事), contract(合同纠纷), labor(劳动争议), "
+                          "tort(侵权), marriage(婚姻家事), real_estate(不动产)"),
+            ToolParameter("plaintiff_location", "string", "原告所在地（市/区）", required=False, default=""),
+            ToolParameter("defendant_location", "string", "被告所在地（市/区）", required=False, default=""),
+            ToolParameter("amount", "number", "争议标的金额（元）", required=False, default=0),
+        ]
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        case_type = kwargs.get("case_type", "civil")
+        plaintiff = kwargs.get("plaintiff_location", "")
+        defendant = kwargs.get("defendant_location", "")
+        amount = float(kwargs.get("amount", 0))
+        rules = {
+            "contract": {
+                "rule": "合同纠纷：被告住所地或合同履行地法院管辖",
+                "legal_basis": "《民事诉讼法》第24条",
+                "options": [
+                    f"被告住所地基层人民法院（{defendant or '需填写'}）" if not defendant else f"{defendant}基层人民法院",
+                    "合同履行地人民法院",
+                ],
+                "level": "基层人民法院" if amount < 50000000 else "中级及以上人民法院",
+            },
+            "labor": {
+                "rule": "劳动争议：用人单位所在地或劳动合同履行地",
+                "legal_basis": "《劳动争议调解仲裁法》第21条、《民事诉讼法》相关司法解释",
+                "options": [
+                    "劳动合同履行地劳动争议仲裁委员会",
+                    f"用人单位所在地劳动争议仲裁委员会" if defendant else "用人单位所在地劳动争议仲裁委员会",
+                ],
+                "level": "劳动仲裁前置，仲裁不服可向基层人民法院起诉",
+            },
+            "tort": {
+                "rule": "侵权纠纷：侵权行为地或被告住所地",
+                "legal_basis": "《民事诉讼法》第29条",
+                "options": [
+                    "侵权行为实施地人民法院",
+                    "侵权结果发生地人民法院",
+                    f"被告住所地人民法院（{defendant or '需填写'}）" if not defendant else f"{defendant}基层人民法院",
+                ],
+                "level": "基层人民法院",
+            },
+            "marriage": {
+                "rule": "婚姻家事：被告住所地（离婚案件有特殊规则）",
+                "legal_basis": "《民事诉讼法》第22条",
+                "options": [
+                    f"被告住所地基层人民法院（{defendant or '需填写'}）" if not defendant else f"{defendant}基层人民法院",
+                ],
+                "level": "基层人民法院",
+                "note": "被告离开住所地超过一年的，由原告住所地法院管辖",
+            },
+            "real_estate": {
+                "rule": "不动产纠纷：不动产所在地法院专属管辖",
+                "legal_basis": "《民事诉讼法》第34条",
+                "options": ["不动产所在地人民法院（专属管辖，不可协议变更）"],
+                "level": "基层人民法院",
+            },
+        }
+        info = rules.get(case_type, rules.get("contract"))
+        return ToolResult(success=True, data={
+            **info,
+            "plaintiff_location": plaintiff or "未提供",
+            "defendant_location": defendant or "未提供",
+            "amount": amount,
+            "reminder": "起诉前请确认被告身份信息和住所地，以法院立案庭要求为准",
+        })
+
+
+# =============================================================================
 # Tool Registry (Singleton)
 # =============================================================================
 
@@ -910,6 +1319,13 @@ class ToolRegistry:
             GovernmentRegulationTool(),
             KnowledgeBaseSearchTool(),
             LegalCalculatorTool(),
+            # New tools (Phase 2 expansion)
+            LimitationCalculatorTool(),
+            LitigationCostCalculatorTool(),
+            ContractRiskCheckerTool(),
+            EvidenceChecklistTool(),
+            LegalTermDictionaryTool(),
+            CourtJurisdictionTool(),
         ]
         for tool in builtins:
             self.register_tool(tool)

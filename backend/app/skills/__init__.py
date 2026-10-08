@@ -589,7 +589,7 @@ def get_builtin_skills() -> list[SkillDefinition]:
         _enterprise_compliance_skill(),
         _litigation_preparation_skill(),
         _debt_recovery_skill(),
-        # New comprehensive guide skills
+        # Comprehensive guide skills
         _labor_dispute_guide_skill(),
         _contract_dispute_guide_skill(),
         _marriage_family_guide_skill(),
@@ -602,6 +602,11 @@ def get_builtin_skills() -> list[SkillDefinition]:
         _administrative_litigation_guide_skill(),
         _consumer_rights_guide_skill(),
         _corporate_legal_daily_guide_skill(),
+        # New skills (Phase 2 expansion)
+        _legal_document_drafting_skill(),
+        _case_strategy_planning_skill(),
+        _legal_risk_assessment_skill(),
+        _regulatory_compliance_check_skill(),
     ]
 
 
@@ -2528,6 +2533,336 @@ def _corporate_legal_daily_guide_skill() -> SkillDefinition:
         ],
         estimated_time_seconds=100,
         difficulty="medium",
+    )
+
+
+# =============================================================================
+# New Skills (Phase 2 expansion)
+# =============================================================================
+
+def _legal_document_drafting_skill() -> SkillDefinition:
+    """法律文书起草技能包 — 智能起草各类法律文书"""
+    return SkillDefinition(
+        id="legal_document_drafting",
+        name="法律文书起草助手",
+        description=(
+            "智能法律文书起草：支持起草起诉状、答辩状、律师函、法律意见书、"
+            "仲裁申请书、上诉状等常用法律文书。根据案情自动生成规范的文书格式和专业的法律表述。"
+        ),
+        category="document",
+        version="1.0.0",
+        author="Legal AI Team",
+        tags=["法律文书", "起诉状", "答辩状", "律师函", "法律意见书", "仲裁申请"],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "document_type": {
+                    "type": "string",
+                    "description": "文书类型",
+                    "enum": ["起诉状", "答辩状", "律师函", "法律意见书", "仲裁申请书", "上诉状", "申诉状"],
+                },
+                "case_description": {"type": "string", "description": "案件事实描述"},
+                "parties": {"type": "object", "description": "当事人信息（原告/被告等）"},
+                "claims": {"type": "string", "description": "诉讼请求或主张"},
+                "key_evidence": {"type": "string", "description": "关键证据（可选）"},
+            },
+            "required": ["document_type", "case_description"],
+        },
+        steps=[
+            SkillStep(
+                id="analyze_requirements",
+                name="分析文书需求",
+                type="llm",
+                description="根据文书类型和案情确定文书结构和要点",
+                config={
+                    "system_prompt": "你是一位专业的法律文书撰写专家，精通各类法律文书的格式规范和写作技巧。",
+                    "prompt": (
+                        "请根据以下信息分析并准备起草{input.document_type}：\n\n"
+                        "案件事实：{input.case_description}\n"
+                        "当事人信息：{input.parties}\n"
+                        "诉讼请求：{input.claims}\n"
+                        "关键证据：{input.key_evidence}\n\n"
+                        "请分析：\n1. 文书应包含的核心要素\n2. 适用的法律依据\n3. "
+                        "事实与理由的逻辑结构\n4. 需要注意的法律规范"
+                    ),
+                    "temperature": 0.3,
+                },
+            ),
+            SkillStep(
+                id="draft_document",
+                name="起草法律文书",
+                type="llm",
+                depends_on=["analyze_requirements"],
+                description="生成完整的法律文书",
+                config={
+                    "system_prompt": (
+                        "你是一位专业的法律文书撰写专家。请严格按照中国法律文书的规范格式起草文书。\n"
+                        "要求：\n1. 格式规范、用语严谨\n2. 事实清楚、理由充分\n"
+                        "3. 引用法律条文准确\n4. 逻辑清晰、条理分明\n"
+                        "5. 只输出文书正文，不加解释说明"
+                    ),
+                    "prompt": (
+                        "请起草{input.document_type}：\n\n"
+                        "案件事实：{input.case_description}\n"
+                        "当事人信息：{input.parties}\n"
+                        "诉讼请求/主张：{input.claims}\n"
+                        "关键证据：{input.key_evidence}\n\n"
+                        "请生成完整的{input.document_type}正文。"
+                    ),
+                    "temperature": 0.2,
+                    "max_tokens": 8192,
+                },
+            ),
+            SkillStep(
+                id="review_polish",
+                name="审校润色",
+                type="llm",
+                depends_on=["draft_document"],
+                description="审校文书格式和法律用语",
+                config={
+                    "system_prompt": "你是法律文书审校专家，请检查以下法律文书的规范性。",
+                    "prompt": (
+                        "请审校以下{input.document_type}，检查：\n"
+                        "1. 格式是否符合规范\n2. 法律用语是否准确\n"
+                        "3. 逻辑是否严密\n4. 是否有遗漏要点\n\n"
+                        "文书内容：\n{draft_document.output}\n\n"
+                        "如有问题请直接修正并输出最终版本。"
+                    ),
+                    "temperature": 0.1,
+                    "max_tokens": 8192,
+                },
+            ),
+        ],
+        estimated_time_seconds=120,
+        difficulty="medium",
+    )
+
+
+def _case_strategy_planning_skill() -> SkillDefinition:
+    """案件策略规划技能包 — 制定全面的诉讼/仲裁策略"""
+    return SkillDefinition(
+        id="case_strategy_planning",
+        name="案件诉讼策略规划",
+        description=(
+            "诉讼策略规划师：根据案件情况制定全面的诉讼/仲裁策略方案，"
+            "包括诉讼请求设计、证据组织方案、对方可能的抗辩分析、"
+            "庭审要点提纲、调解方案设计等。"
+        ),
+        category="litigation",
+        version="1.0.0",
+        author="Legal AI Team",
+        tags=["诉讼策略", "案件规划", "庭审准备", "证据组织", "调解方案"],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "case_summary": {"type": "string", "description": "案件概要描述"},
+                "role": {"type": "string", "description": "代理角色", "enum": ["原告", "被告", "上诉人", "被上诉人"]},
+                "dispute_amount": {"type": "number", "description": "争议金额（元）"},
+                "key_evidence": {"type": "string", "description": "现有证据概述"},
+                "opponent_info": {"type": "string", "description": "对方可能的抗辩/主张"},
+            },
+            "required": ["case_summary", "role"],
+        },
+        steps=[
+            SkillStep(
+                id="case_analysis",
+                name="案件法律分析",
+                type="llm",
+                description="深入分析案件法律关系和争议焦点",
+                config={
+                    "system_prompt": "你是一位经验丰富的诉讼律师，擅长制定诉讼策略。",
+                    "prompt": (
+                        "请对以下案件进行深入法律分析：\n\n"
+                        "案件概要：{input.case_summary}\n"
+                        "代理角色：{input.role}\n"
+                        "争议金额：{input.dispute_amount}\n"
+                        "现有证据：{input.key_evidence}\n"
+                        "对方主张：{input.opponent_info}\n\n"
+                        "请分析：\n1. 法律关系定性\n2. 请求权基础分析\n"
+                        "3. 核心争议焦点（至少3个）\n4. 我方优势与劣势\n"
+                        "5. 适用的法律法规和司法解释\n6. 类似案例裁判倾向"
+                    ),
+                    "temperature": 0.3,
+                },
+            ),
+            SkillStep(
+                id="strategy_design",
+                name="策略方案设计",
+                type="llm",
+                depends_on=["case_analysis"],
+                description="制定诉讼策略和应对方案",
+                config={
+                    "system_prompt": "你是诉讼策略专家。请制定详细的诉讼策略方案。",
+                    "prompt": (
+                        "基于以下案件分析结果，制定诉讼策略方案：\n\n{case_analysis.output}\n\n"
+                        "我方角色：{input.role}\n\n"
+                        "请制定：\n1. 诉讼请求/答辩方案设计\n2. 证据组织方案"
+                        "（证据清单+举证顺序）\n3. 对方可能的抗辩及应对\n"
+                        "4. 庭审发问提纲\n5. 调解/和解方案建议\n"
+                        "6. 风险提示及备选方案"
+                    ),
+                    "temperature": 0.3,
+                    "max_tokens": 8192,
+                },
+            ),
+        ],
+        estimated_time_seconds=90,
+        difficulty="high",
+    )
+
+
+def _legal_risk_assessment_skill() -> SkillDefinition:
+    """法律风险评估技能包 — 对企业/个人进行全方位法律风险扫描"""
+    return SkillDefinition(
+        id="legal_risk_assessment",
+        name="法律风险评估",
+        description=(
+            "企业/个人法律风险评估：对经营管理或个人行为进行全方位法律风险扫描，"
+            "识别潜在法律风险点，评估风险等级，给出防控建议。"
+            "覆盖合同管理、劳动用工、知识产权、合规经营等领域。"
+        ),
+        category="compliance",
+        version="1.0.0",
+        author="Legal AI Team",
+        tags=["风险评估", "法律风险", "合规检查", "企业风控", "风险防控"],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "assessment_target": {"type": "string", "description": "评估对象描述（企业概况/个人情况）"},
+                "industry": {"type": "string", "description": "所在行业", "required": False},
+                "focus_areas": {
+                    "type": "array",
+                    "description": "重点关注领域",
+                    "items": {"type": "string", "enum": ["合同管理", "劳动用工", "知识产权", "合规经营", "税务风险", "数据安全", "环保合规"]},
+                    "required": False,
+                },
+                "existing_issues": {"type": "string", "description": "已知问题描述（可选）"},
+            },
+            "required": ["assessment_target"],
+        },
+        steps=[
+            SkillStep(
+                id="risk_scan",
+                name="风险扫描",
+                type="llm",
+                description="扫描识别各领域法律风险点",
+                config={
+                    "system_prompt": "你是一位企业法律风险评估专家，擅长识别和评估各类法律风险。",
+                    "prompt": (
+                        "请对以下对象进行全方位法律风险扫描：\n\n"
+                        "评估对象：{input.assessment_target}\n"
+                        "所在行业：{input.industry}\n"
+                        "重点关注：{input.focus_areas}\n"
+                        "已知问题：{input.existing_issues}\n\n"
+                        "请从以下维度逐一扫描风险：\n"
+                        "1. 合同管理风险\n2. 劳动用工风险\n3. 知识产权风险\n"
+                        "4. 合规经营风险\n5. 税务风险\n6. 数据安全与隐私风险\n\n"
+                        "对每个风险点标注：风险等级（高/中/低）、发生概率、影响程度"
+                    ),
+                    "temperature": 0.3,
+                },
+            ),
+            SkillStep(
+                id="risk_report",
+                name="生成风险评估报告",
+                type="llm",
+                depends_on=["risk_scan"],
+                description="生成结构化风险评估报告及防控建议",
+                config={
+                    "system_prompt": "你是法律风险评估报告撰写专家。",
+                    "prompt": (
+                        "基于以下风险扫描结果，生成完整的法律风险评估报告：\n\n"
+                        "{risk_scan.output}\n\n"
+                        "报告结构：\n1. 评估概要（总体风险等级、主要发现）\n"
+                        "2. 风险明细表（每个风险点的描述、等级、法律依据、"
+                        "可能后果）\n3. 风险防控建议（立即整改/短期改进/长期优化）\n"
+                        "4. 优先行动计划（按紧急程度排序）"
+                    ),
+                    "temperature": 0.2,
+                    "max_tokens": 8192,
+                },
+            ),
+        ],
+        estimated_time_seconds=100,
+        difficulty="high",
+    )
+
+
+def _regulatory_compliance_check_skill() -> SkillDefinition:
+    """法规合规检查技能包 — 检查企业是否符合最新法规要求"""
+    return SkillDefinition(
+        id="regulatory_compliance_check",
+        name="法规合规检查",
+        description=(
+            "法规合规检查：根据企业所处行业和经营范围，自动匹配适用的法律法规，"
+            "检查企业在许可证照、数据保护、劳动合规、广告合规、"
+            "环保要求等方面的合规状态，识别违规风险并给出整改建议。"
+        ),
+        category="compliance",
+        version="1.0.0",
+        author="Legal AI Team",
+        tags=["合规检查", "法规遵从", "行政许可", "数据保护", "整改建议"],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "company_info": {"type": "string", "description": "企业基本信息（名称、行业、经营范围、规模）"},
+                "licenses_held": {"type": "string", "description": "已持有的许可证照清单（可选）"},
+                "check_areas": {
+                    "type": "array",
+                    "description": "需要检查的合规领域",
+                    "items": {"type": "string", "enum": ["行政许可", "数据安全", "劳动合规", "广告合规", "环保合规", "税务合规", "反洗钱", "消费者保护"]},
+                    "required": False,
+                },
+            },
+            "required": ["company_info"],
+        },
+        steps=[
+            SkillStep(
+                id="regulation_matching",
+                name="法规匹配",
+                type="llm",
+                description="匹配企业适用的法律法规清单",
+                config={
+                    "system_prompt": "你是企业合规专家，精通各行业适用的法律法规。",
+                    "prompt": (
+                        "请根据以下企业信息，列出该企业应当遵守的全部法律法规和监管要求：\n\n"
+                        "企业信息：{input.company_info}\n"
+                        "已持证照明：{input.licenses_held}\n"
+                        "检查领域：{input.check_areas}\n\n"
+                        "请按领域分类列出：\n"
+                        "1. 适用的法律、行政法规、部门规章\n"
+                        "2. 需要的行政许可/资质/备案\n"
+                        "3. 行业特殊监管要求\n"
+                        "4. 近期重要法规变化"
+                    ),
+                    "temperature": 0.2,
+                },
+            ),
+            SkillStep(
+                id="compliance_check",
+                name="合规检查与整改建议",
+                type="llm",
+                depends_on=["regulation_matching"],
+                description="逐项检查合规状态并给出整改建议",
+                config={
+                    "system_prompt": "你是企业合规审计专家。",
+                    "prompt": (
+                        "基于以下法规匹配结果，对企业进行合规检查：\n\n"
+                        "法规清单：\n{regulation_matching.output}\n\n"
+                        "企业信息：{input.company_info}\n"
+                        "已持证照明：{input.licenses_held}\n\n"
+                        "请逐项检查：\n1. 许可证照是否齐全\n2. 各项合规要求的达标情况\n"
+                        "3. 存在的违规风险\n4. 整改建议和优先级\n"
+                        "5. 合规制度建设建议\n\n"
+                        "对每项给出：合规状态（合规/待整改/不合规）、风险等级、整改建议"
+                    ),
+                    "temperature": 0.2,
+                    "max_tokens": 8192,
+                },
+            ),
+        ],
+        estimated_time_seconds=100,
+        difficulty="high",
     )
 
 
