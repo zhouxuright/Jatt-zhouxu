@@ -73,6 +73,26 @@
           </div>
         </div>
 
+        <!-- 风险分布色块 -->
+        <div class="risk-summary-row">
+          <div class="risk-chip risk-chip-high">
+            <span class="chip-count">{{ riskCounts.high }}</span>
+            <span class="chip-label">高风险</span>
+          </div>
+          <div class="risk-chip risk-chip-medium">
+            <span class="chip-count">{{ riskCounts.medium }}</span>
+            <span class="chip-label">中风险</span>
+          </div>
+          <div class="risk-chip risk-chip-low">
+            <span class="chip-count">{{ riskCounts.low }}</span>
+            <span class="chip-label">低风险</span>
+          </div>
+          <div class="risk-chip risk-chip-total">
+            <span class="chip-count">{{ result.risk_items.length }}</span>
+            <span class="chip-label">风险条款总数</span>
+          </div>
+        </div>
+
         <!-- 风险条目列表 -->
         <h3 class="section-title">风险条款详情</h3>
         <div class="risk-list">
@@ -95,17 +115,20 @@
             </div>
 
             <div class="risk-body">
-              <div class="risk-original">
-                <label>原文条款：</label>
-                <p>{{ item.original_text }}</p>
+              <!-- 条款原文 / 修订建议 左右对照 -->
+              <div class="compare-grid">
+                <div class="compare-col compare-original">
+                  <label>原文条款</label>
+                  <p>{{ item.original_text || '（未识别到原文片段）' }}</p>
+                </div>
+                <div class="compare-col compare-suggestion">
+                  <label>修订建议</label>
+                  <p>{{ item.suggestion || '（无修改建议）' }}</p>
+                </div>
               </div>
               <div class="risk-description">
-                <label>风险分析：</label>
+                <label>风险分析</label>
                 <p>{{ item.description }}</p>
-              </div>
-              <div class="risk-suggestion">
-                <label>修改建议：</label>
-                <p>{{ item.suggestion }}</p>
               </div>
             </div>
           </div>
@@ -137,6 +160,14 @@ const scoreColor = computed(() => {
   if (s >= 80) return '#38a169'
   if (s >= 60) return '#dd6b20'
   return '#e53e3e'
+})
+
+const riskCounts = computed(() => {
+  const c = { high: 0, medium: 0, low: 0 }
+  for (const r of result.value?.risk_items || []) {
+    if (r.risk_level in c) c[r.risk_level as keyof typeof c]++
+  }
+  return c
 })
 
 function handleFileChange(file: UploadFile) {
@@ -372,6 +403,127 @@ async function handleReview() {
   gap: 16px;
 }
 
+/* ── 风险分布色块 ── */
+.risk-summary-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.risk-chip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-white);
+}
+
+.risk-chip-high {
+  border-top: 3px solid var(--danger-color);
+}
+
+.risk-chip-medium {
+  border-top: 3px solid var(--warning-color);
+}
+
+.risk-chip-low {
+  border-top: 3px solid var(--success-color);
+}
+
+.risk-chip-total {
+  border-top: 3px solid var(--primary-light);
+}
+
+.chip-count {
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.risk-chip-high .chip-count { color: var(--danger-color); }
+.risk-chip-medium .chip-count { color: var(--warning-color); }
+.risk-chip-low .chip-count { color: var(--success-color); }
+.risk-chip-total .chip-count { color: var(--primary-light); }
+
+.chip-label {
+  font-size: 13px;
+  color: var(--text-regular);
+}
+
+/* ── 条款对照 ── */
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.compare-col {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+}
+
+.compare-col label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  letter-spacing: 0.5px;
+}
+
+.compare-col p {
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.compare-original {
+  background-color: rgba(229, 62, 62, 0.05);
+  border: 1px dashed rgba(229, 62, 62, 0.35);
+}
+
+.compare-original label {
+  color: var(--danger-color);
+}
+
+.compare-original p {
+  color: var(--text-regular);
+}
+
+.compare-suggestion {
+  background-color: rgba(56, 161, 105, 0.06);
+  border: 1px dashed rgba(56, 161, 105, 0.4);
+}
+
+.compare-suggestion label {
+  color: var(--success-color);
+}
+
+.compare-suggestion p {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.risk-description {
+  background-color: var(--bg-color);
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+}
+
+@media (max-width: 768px) {
+  .compare-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .risk-summary-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 .risk-card {
   background-color: var(--bg-white);
   border-radius: var(--radius-md);
@@ -432,16 +584,5 @@ async function handleReview() {
   color: var(--text-regular);
   line-height: 1.7;
   margin: 0;
-}
-
-.risk-original {
-  background-color: var(--bg-color);
-  padding: 12px;
-  border-radius: var(--radius-sm);
-}
-
-.risk-suggestion p {
-  color: var(--success-color);
-  font-weight: 500;
 }
 </style>

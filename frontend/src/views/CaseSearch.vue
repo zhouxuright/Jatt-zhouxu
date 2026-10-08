@@ -28,24 +28,8 @@
         </el-input>
       </div>
 
-      <!-- 筛选条件 -->
-      <div class="filter-bar">
-        <el-select v-model="caseType" placeholder="案件类型" clearable size="default" @change="handleSearch">
-          <el-option label="全部" value="" />
-          <el-option label="民事" value="民事" />
-          <el-option label="刑事" value="刑事" />
-          <el-option label="行政" value="行政" />
-        </el-select>
-
-        <el-select v-model="yearRange" placeholder="年份范围" clearable size="default" @change="handleSearch">
-          <el-option label="全部年份" value="" />
-          <el-option label="2024年" value="2024" />
-          <el-option label="2023年" value="2023" />
-          <el-option label="2022年" value="2022" />
-          <el-option label="2021年" value="2021" />
-          <el-option label="2020年及以前" value="2020" />
-        </el-select>
-      </div>
+      <!-- 筛选条件：案件类型/案由/法院，选项从后端分类接口动态加载（服务端过滤） -->
+      <SearchFilterBar v-model="filterValues" :filters="caseFilterConfigs" @change="handleFilterChange" />
 
       <!-- AI 总结 -->
       <div v-if="aiSummary" class="ai-summary">
@@ -105,6 +89,10 @@
               <span v-if="item.cause_of_action">
                 <el-icon><Collection /></el-icon>
                 {{ item.cause_of_action }}
+              </span>
+              <span v-if="item.relevance_score > 0">
+                <el-icon><Clock /></el-icon>
+                相关度：{{ (item.relevance_score * 100).toFixed(0) }}%
               </span>
             </div>
 
@@ -195,7 +183,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Search,
@@ -203,17 +191,17 @@ import {
   Files,
   OfficeBuilding,
   Collection,
+  Clock,
   View,
   CopyDocument,
 } from '@element-plus/icons-vue'
 import { useClipboard } from '@vueuse/core'
 import { caseApi, type CaseItem, type CaseDetail } from '@/api/cases'
+import SearchFilterBar, { type FilterConfig } from '@/components/SearchFilterBar.vue'
 
 const { copy } = useClipboard()
 
 const keyword = ref('')
-const caseType = ref('')
-const yearRange = ref('')
 const searching = ref(false)
 const hasSearched = ref(false)
 const results = ref<CaseItem[]>([])
@@ -221,6 +209,37 @@ const totalResults = ref(0)
 const aiSummary = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
+
+// 筛选选项从后端动态加载（基于库内真实取值，避免硬编码选项与数据不符）
+const filterValues = ref<Record<string, string>>({ caseType: '', cause: '', court: '' })
+const categoryOptions = ref<{ caseTypes: string[]; causes: string[]; courts: string[] }>({
+  caseTypes: [],
+  causes: [],
+  courts: [],
+})
+
+const caseFilterConfigs = computed<FilterConfig[]>(() => [
+  {
+    key: 'caseType',
+    label: '案件类型',
+    placeholder: '全部类型',
+    options: categoryOptions.value.caseTypes.map((t) => ({ label: t, value: t })),
+  },
+  {
+    key: 'cause',
+    label: '案由',
+    placeholder: '全部案由',
+    width: 180,
+    options: categoryOptions.value.causes.map((c) => ({ label: c, value: c })),
+  },
+  {
+    key: 'court',
+    label: '法院',
+    placeholder: '全部法院',
+    width: 200,
+    options: categoryOptions.value.courts.map((c) => ({ label: c, value: c })),
+  },
+])
 
 const detailDialogVisible = ref(false)
 const selectedCase = ref<CaseDetail | null>(null)
@@ -232,6 +251,25 @@ function getCaseTypeTag(type: string) {
     '行政': 'warning',
   }
   return map[type] || 'info'
+}
+
+async function loadFilterOptions() {
+  try {
+    const res = await caseApi.getCategories()
+    categoryOptions.value = {
+      caseTypes: res.data.case_types || [],
+      causes: res.data.causes_of_action || [],
+      courts: res.data.courts || [],
+    }
+  } catch {
+    // 选项加载失败时筛选器保持为空，搜索功能不受影响
+  }
+}
+
+function handleFilterChange() {
+  if (keyword.value.trim()) {
+    handleSearch()
+  }
 }
 
 async function handleSearch() {
@@ -250,18 +288,16 @@ async function handleSearch() {
       top_k: pageSize.value,
     }
 
-    if (caseType.value) {
-      params.case_type = caseType.value
+    if (filterValues.value.caseType) {
+      params.case_type = filterValues.value.caseType
     }
 
-    if (yearRange.value) {
-      const year = parseInt(yearRange.value)
-      if (year === 2020) {
-        params.year_to = 2020
-      } else {
-        params.year_from = year
-        params.year_to = year
-      }
+    if (filterValues.value.cause) {
+      params.cause_of_action = filterValues.value.cause
+    }
+
+    if (filterValues.value.court) {
+      params.court_name = filterValues.value.court
     }
 
     const res = await caseApi.searchCases(params)
@@ -309,6 +345,10 @@ function handleCopyCase(item: CaseItem) {
   copy(text)
   ElMessage.success('已复制到剪贴板')
 }
+
+onMounted(() => {
+  loadFilterOptions()
+})
 </script>
 
 <style scoped>
@@ -337,12 +377,6 @@ function handleCopyCase(item: CaseItem) {
 
 .search-bar {
   margin-bottom: 16px;
-}
-
-.filter-bar {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 24px;
 }
 
 .ai-summary {

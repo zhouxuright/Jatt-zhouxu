@@ -28,19 +28,8 @@
         </el-input>
       </div>
 
-      <!-- 筛选条件 -->
-      <div class="filter-bar">
-        <el-radio-group v-model="filterType" size="small" @change="handleSearch">
-          <el-radio-button label="all">全部</el-radio-button>
-          <el-radio-button label="constitutional">宪法</el-radio-button>
-          <el-radio-button label="criminal">刑法</el-radio-button>
-          <el-radio-button label="civil">民法</el-radio-button>
-          <el-radio-button label="administrative">行政法</el-radio-button>
-          <el-radio-button label="commercial">商法</el-radio-button>
-          <el-radio-button label="labor">劳动法</el-radio-button>
-          <el-radio-button label="intellectual_property">知识产权</el-radio-button>
-        </el-radio-group>
-      </div>
+      <!-- 筛选条件：效力级别（基于返回结果客户端过滤，检索结果的 category 字段即法规效力级别） -->
+      <SearchFilterBar v-model="filterValues" :filters="lawFilterConfigs" />
 
       <!-- 搜索结果 -->
       <div class="results-section" v-loading="searching">
@@ -48,17 +37,24 @@
           <el-empty description="请输入关键词开始搜索" :image-size="100" />
         </div>
 
-        <div v-else-if="results.length === 0" class="search-empty">
-          <el-empty description="未找到相关法规，请尝试其他关键词" :image-size="100" />
+        <div v-else-if="filteredResults.length === 0" class="search-empty">
+          <el-empty description="当前筛选条件下没有匹配结果，可调整关键词或清除筛选" :image-size="100">
+            <el-button v-if="hasActiveFilter" type="primary" plain size="small" @click="clearFilters">
+              清除筛选条件
+            </el-button>
+          </el-empty>
         </div>
 
         <div v-else class="results-list">
           <div class="result-count">
-            找到 <strong>{{ totalResults }}</strong> 条相关结果
+            找到 <strong>{{ filteredResults.length }}</strong> 条相关结果
+            <span v-if="hasActiveFilter && filteredResults.length !== results.length" class="filter-note">
+              （已从 {{ results.length }} 条中按效力级别筛选）
+            </span>
           </div>
 
           <div
-            v-for="item in results"
+            v-for="item in filteredResults"
             :key="item.article_number + item.law_name"
             class="result-card"
           >
@@ -67,16 +63,13 @@
                 <el-icon><Document /></el-icon>
                 {{ item.law_name }} - {{ formatArticleNumber(item.article_number) }}
               </h3>
-              <el-tag size="small" type="success">
-                {{ item.effective_status }}
-              </el-tag>
+              <div class="result-header-tags">
+                <el-tag v-if="item.category" size="small" type="info">{{ item.category }}</el-tag>
+                <el-tag size="small" type="success">{{ statusLabel(item.effective_status) }}</el-tag>
+              </div>
             </div>
 
             <div class="result-meta">
-              <span v-if="item.category">
-                <el-icon><OfficeBuilding /></el-icon>
-                {{ item.category }}
-              </span>
               <span v-if="item.publish_year">
                 <el-icon><Calendar /></el-icon>
                 发布年份：{{ item.publish_year }}
@@ -87,13 +80,16 @@
               </span>
             </div>
 
-            <div class="result-content">
+            <div class="result-content" :class="{ expanded: isExpanded(item) }">
               <p>{{ item.article_content }}</p>
             </div>
 
             <div class="result-actions">
               <el-button type="primary" link size="small" @click="handleCopy(item)">
                 <el-icon><CopyDocument /></el-icon>复制条文
+              </el-button>
+              <el-button v-if="isLongContent(item)" type="primary" link size="small" @click="toggleExpand(item)">
+                {{ isExpanded(item) ? '收起' : '展开全文' }}
               </el-button>
             </div>
           </div>
@@ -124,12 +120,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Search,
   Document,
-  OfficeBuilding,
   Calendar,
   Clock,
   CopyDocument,
@@ -137,6 +132,7 @@ import {
 import { useClipboard } from '@vueuse/core'
 import MarkdownIt from 'markdown-it'
 import { lawApi } from '@/api/law'
+import SearchFilterBar, { type FilterConfig } from '@/components/SearchFilterBar.vue'
 
 const { copy } = useClipboard()
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
@@ -153,7 +149,6 @@ interface LawResult {
 }
 
 const keyword = ref('')
-const filterType = ref('all')
 const searching = ref(false)
 const hasSearched = ref(false)
 const results = ref<LawResult[]>([])
@@ -161,6 +156,61 @@ const totalResults = ref(0)
 const formattedOutput = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
+const expandedCards = ref<Record<string, boolean>>({})
+
+// 效力级别筛选：检索结果的 category 字段实际存的是法规效力级别（法律/行政法规/司法解释...）
+const filterValues = ref<Record<string, string>>({ level: '' })
+
+const lawFilterConfigs: FilterConfig[] = [
+  {
+    key: 'level',
+    label: '效力级别',
+    placeholder: '全部级别',
+    width: 170,
+    options: [
+      { label: '法律', value: '法律' },
+      { label: '行政法规', value: '行政法规' },
+      { label: '司法解释', value: '司法解释' },
+      { label: '部门规章', value: '部门规章' },
+      { label: '地方性法规', value: '地方性法规' },
+      { label: '规范性文件', value: '规范性文件' },
+    ],
+  },
+]
+
+const hasActiveFilter = computed(() => filterValues.value.level !== '')
+
+const filteredResults = computed(() => {
+  const level = filterValues.value.level
+  if (!level) return results.value
+  return results.value.filter((r) => r.category === level)
+})
+
+function clearFilters() {
+  filterValues.value = { level: '' }
+}
+
+function statusLabel(s: string): string {
+  if (!s || s === 'active' || s === '有效') return '现行有效'
+  return s
+}
+
+function cardKey(item: LawResult): string {
+  return `${item.law_name}|${item.article_number}`
+}
+
+function isExpanded(item: LawResult): boolean {
+  return !!expandedCards.value[cardKey(item)]
+}
+
+function isLongContent(item: LawResult): boolean {
+  return (item.article_content || '').length > 180
+}
+
+function toggleExpand(item: LawResult) {
+  const key = cardKey(item)
+  expandedCards.value[key] = !expandedCards.value[key]
+}
 
 function handleSearch() {
   if (!keyword.value.trim()) {
@@ -176,10 +226,8 @@ async function searchLaws() {
   hasSearched.value = true
 
   try {
-    const category = filterType.value === 'all' ? undefined : filterType.value
     const res = await lawApi.searchLaws({
       query: keyword.value,
-      category: category,
       top_k: pageSize.value,
     })
     results.value = res.data.results || []
@@ -205,6 +253,8 @@ function handleClear() {
   hasSearched.value = false
   formattedOutput.value = ''
   currentPage.value = 1
+  clearFilters()
+  expandedCards.value = {}
 }
 
 function handleCopy(item: LawResult) {
@@ -256,8 +306,9 @@ function renderMarkdown(content: string) {
   margin-bottom: 16px;
 }
 
-.filter-bar {
-  margin-bottom: 24px;
+.filter-note {
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 .search-empty {
@@ -295,6 +346,13 @@ function renderMarkdown(content: string) {
   margin-bottom: 12px;
 }
 
+.result-header-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .result-title {
   font-size: 16px;
   font-weight: 600;
@@ -329,6 +387,16 @@ function renderMarkdown(content: string) {
   color: var(--text-regular);
   line-height: 1.7;
   margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.result-content.expanded p {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
 }
 
 .result-actions {

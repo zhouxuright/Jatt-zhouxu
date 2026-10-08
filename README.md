@@ -3,8 +3,9 @@
 基于 AI 大模型的中国法律智能助手平台，提供法律咨询、合同审查、文书生成、
 法规与案例检索、诉讼支持、企业合规等智能服务。
 
-> **文档状态**：本次修订于 2026-09-24，所有数字均为**直连生产库实测**，非设计目标。
-> 上一版（2026-08-15）中的数据规模与功能清单已严重滞后，请以本版为准。
+> 🆕 **2026-10-08 更新**：新增工作台 Dashboard、数据溯源过滤（RAG 检索自动排除合成数据）、LLM 驱动的高质量数据增强管道（DeepSeek）、数据质量门控。项目已按 MIT 许可完全开源。
+>
+> **文档状态**：本次修订于 2026-10-08，所有数字均为**直连生产库实测**，非设计目标。
 
 ## 项目概述
 
@@ -19,6 +20,7 @@
 
 | 功能模块 | 描述 |
 |---------|------|
+| **工作台** | 登录后首页 Dashboard：快捷操作、数据概览、最近活动、系统状态 |
 | **智能对话** | 多智能体路由，支持普通问答与深度思考两种模式 |
 | **深度推理** | 可视化思维链：IRAC 四段论证、多步推理、置信度仪表盘 |
 | **技能包** | 19 个专业技能包（劳动争议、合同分析、知识产权等），多步骤编排 |
@@ -317,7 +319,8 @@ curl -X POST http://localhost:8000/api/v1/document/generate \
 | **嵌入模型** | `BAAI/bge-m3` |
 | **重排模型** | `BAAI/bge-reranker-v2-m3` |
 | **LLM 提供商** | DeepSeek（默认）、OpenAI，并支持 Qwen / GLM 等 |
-| **RAG** | 多策略召回 + 引用核验 + 置信度 |
+| **RAG** | 多策略召回 + 引用核验 + 置信度 + **数据溯源过滤**（自动排除合成数据） |
+| **数据增强** | DeepSeek 驱动的高质量 QA 生成（5 角度：案由认定/法律适用/证据分析/判决理由/当事人权益） |
 | **可解释性** | IRAC 推理框架、思维链可视化 |
 
 ### 安全与合规
@@ -391,7 +394,7 @@ Legal Intelligent Assistance System/
 │   ├── src/
 │   │   ├── api/                    # API 请求模块
 │   │   ├── components/             # 公共组件（AppLayout / ChatMessage 等）
-│   │   ├── views/                  # 18 个页面
+│   │   ├── views/                  # 19 个页面（含 Dashboard 工作台）
 │   │   ├── router/                 # 路由 + 权限守卫
 │   │   ├── stores/                 # Pinia（含 auth 的 isAdmin）
 │   │   └── styles/
@@ -459,7 +462,38 @@ pytest
 - TypeScript：strict 模式
 - 提交信息：遵循 Conventional Commits
 
-## 数据源与合规
+## 数据质量保障
+
+### 数据溯源过滤
+
+RAG 检索管线已内置**数据溯源过滤**机制——所有检索阶段（BM25 关键词匹配、Milvus 向量搜索、知识图谱遍历）自动排除 `source='generated'` 或 `source='synthetic'` 的合成数据，确保用户看到的引用均来自真实法律数据。
+
+### LLM 驱动的数据增强
+
+系统提供 DeepSeek 驱动的高质量数据增强管道，从真实案例和法条出发生成有逻辑关系的 QA 数据（而非模板随机拼接）：
+
+```bash
+# 从真实案例生成多角度 QA 对
+docker exec <backend> python /app/scripts/run_llm_enhancement.py \
+  --source cail --limit 1000 --table court_cases
+
+# 数据质量报告
+docker exec <backend> python /app/scripts/data_quality_report.py --format table
+
+# 质量门控（校验 LLM 生成数据的法条引用准确性）
+docker exec <backend> python /app/scripts/quality_gate.py --min-score 0.5
+```
+
+### 数据源合规
+
+系统使用的数据按**可引用性**分为四类（详见 [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md)）：
+
+| 类别 | 来源 | 用途 | RAG 检索 |
+| --- | --- | --- | --- |
+| **权威可引用** | 国家法律法规数据库、最高法指导案例 | 法律依据展示 | ✅ 包含 |
+| **开源数据集** | CAIL / LawRefBook / DISC-LawLLM 等 | 评测与检索补充 | ✅ 包含 |
+| **LLM 增强** | DeepSeek 基于真实数据生成 | 检索补充 | ✅ 包含（带溯源标记） |
+| **合成数据** | 模板生成（已废弃） | 仅测试 | ❌ 自动排除 |
 
 系统使用的数据按**可引用性**分为三类，切勿混用：
 
@@ -478,11 +512,15 @@ pytest
 
 ## 许可证与免责声明
 
-本项目仅供学习和研究使用。
+本项目基于 **MIT License** 开源。详见 [LICENSE](LICENSE) 文件。
 
 **免责声明**：本系统由 AI 生成的法律内容仅供参考，**不构成正式法律意见**，
 亦不能替代执业律师的专业判断。对于涉及重大权益的法律问题，请务必咨询持证执业律师。
 系统输出的法条、案例引用请以官方权威来源为准。
+
+## 贡献
+
+欢迎贡献！请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解开发流程和代码规范。
 
 ---
 

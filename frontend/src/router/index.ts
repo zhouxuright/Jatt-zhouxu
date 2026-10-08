@@ -5,8 +5,14 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: () => import('@/components/AppLayout.vue'),
-    redirect: '/chat',
+    redirect: '/dashboard',
     children: [
+      {
+        path: 'dashboard',
+        name: 'Dashboard',
+        component: () => import('@/views/Dashboard.vue'),
+        meta: { title: '工作台', requiresAuth: true },
+      },
       {
         path: 'chat',
         name: 'Chat',
@@ -134,7 +140,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
-    redirect: '/chat',
+    redirect: '/dashboard',
   },
 ]
 
@@ -160,8 +166,8 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (!requiresAuth && token && (to.name === 'Login' || to.name === 'Register')) {
-    // 已登录但访问登录/注册页 → 跳转首页
-    next({ name: 'Chat' })
+    // 已登录但访问登录/注册页 → 跳转工作台
+    next({ name: 'Dashboard' })
     return
   }
 
@@ -174,7 +180,7 @@ router.beforeEach(async (to, _from, next) => {
       await auth.fetchUser()
     }
     if (!auth.isAdmin) {
-      next({ name: 'Chat' })
+      next({ name: 'Dashboard' })
       return
     }
   }

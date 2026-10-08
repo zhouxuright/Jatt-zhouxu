@@ -38,9 +38,27 @@ MILVUS_BATCH = 500
 EMBED_BATCH = 64
 CONTENT_MAX = 8000
 
+# Milvus VARCHAR max_length counts UTF-8 BYTES, not characters.
+# Chinese text at 3 bytes/char overflows quickly (e.g. law_name[:256] chars
+# can be 768 bytes > 256-byte schema limit → insert error).
+B_LAW_NAME = 256
+B_ARTICLE_NUM = 64
+B_CONTENT = 8000
+B_TAGS = 512
+B_CATEGORY = 64
+
+
+def _utf8_truncate(s: str | None, max_bytes: int) -> str:
+    if not s:
+        return ""
+    b = s.encode("utf-8")
+    if len(b) <= max_bytes:
+        return s
+    return b[:max_bytes].decode("utf-8", errors="ignore")
+
 
 def _clean(text: str) -> str:
-    return re.sub(r"\s+", "", text or "").strip()[:CONTENT_MAX]
+    return _utf8_truncate(re.sub(r"\s+", "", text or "").strip(), B_CONTENT)
 
 
 def _connect():
@@ -136,11 +154,11 @@ def _flush_batch(coll, model, rows: list[tuple], dry_run: bool) -> tuple[int, in
     embeddings = _embed(model, [t for _, _, t in keep])
     data = [
         [rid for rid, _, _ in keep],
-        [r[4][:256] for _, r, _ in keep],
-        [r[1][:64] for _, r, _ in keep],
+        [_utf8_truncate(r[4], B_LAW_NAME) for _, r, _ in keep],
+        [_utf8_truncate(r[1], B_ARTICLE_NUM) for _, r, _ in keep],
         [t for _, _, t in keep],
-        [r[3][:512] for _, r, _ in keep],
-        [r[5][:64] for _, r, _ in keep],
+        [_utf8_truncate(r[3], B_TAGS) for _, r, _ in keep],
+        [_utf8_truncate(r[5], B_CATEGORY) for _, r, _ in keep],
         embeddings,
     ]
     coll.insert(data)

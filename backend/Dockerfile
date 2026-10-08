@@ -13,6 +13,33 @@
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS builder
 
+# ---------------------------------------------------------------------------
+# pip 源（可覆盖）
+# ---------------------------------------------------------------------------
+# 此前两处 pip install 都硬编码清华源。实测该源在本机**不可达**
+# （urllib → URLError），导致 `docker compose build backend` 必然失败于
+# "Could not find a version that satisfies the requirement fastapi>=0.115.0"。
+# 实测可达的源：mirrors.aliyun.com、pypi.org。
+#
+# 改为 ARG，默认用可达的 aliyun；如需换源无需改 Dockerfile：
+#   docker compose build --build-arg PIP_INDEX_URL=https://pypi.org/simple/ backend
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+
+# ---------------------------------------------------------------------------
+# CPU-only torch
+# ---------------------------------------------------------------------------
+# 本部署是纯 CPU 的：实测老镜像内 torch.cuda.is_available() == False，
+# docker-compose.yml 也没有任何 GPU 预留。但 PyPI 默认的 torch wheel 是 CUDA
+# 构建（2.14.0+cu130），会连带拉入 15 个 nvidia-* 包、约 5GB，
+# 这些依赖在本机永远无法使用 —— 镜像因此膨胀到 12.6GB，
+# 且每次重建都要重新下载这 5GB（实测网速 0.3~1.2 MB/s，会卡死）。
+#
+# 因此先从 PyTorch 官方 CPU 索引装 torch（体积小一个数量级），
+# 之后 requirements.txt 看到 torch 已满足便不会再装 CUDA 版。
+# 版本与老镜像保持一致，避免引入行为变化。
+ARG TORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
+ARG TORCH_VERSION=2.14.0
+
 WORKDIR /app
 
 # Use CN mirrors: deb.debian.org is unreachable from many CN networks
@@ -25,18 +52,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better layer caching
+# Create the venv and install CPU-only torch FIRST, before requirements.txt.
+# Keeping these in separate layers means the (large) torch layer survives any
+# change to requirements.txt, and vice versa.
+# --retries/--timeout: wheel 体量大，网络抖动时默认重试次数不足。
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip -i ${PIP_INDEX_URL} \
+        --retries 5 --timeout 60
+
+RUN /opt/venv/bin/pip install --no-cache-dir "torch==${TORCH_VERSION}" \
+        --index-url ${TORCH_CPU_INDEX} \
+        --retries 5 --timeout 60
+
+# Copy requirements before installing them for better layer caching
 COPY requirements.txt .
 
-# Install Python dependencies into a virtual environment (CN pip mirror)
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# torch 已在上一步装好，pip 不会再拉 CUDA 版（见文件头说明）。
+RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt -i ${PIP_INDEX_URL} \
+        --retries 5 --timeout 60
 
 # Voice input (speech-to-text): openai-whisper in a separate layer so the
 # heavy requirements layer (torch + sentence-transformers/FlagEmbedding)
 # stays cached. torch is already pulled by sentence-transformers.
-RUN /opt/venv/bin/pip install --no-cache-dir openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN /opt/venv/bin/pip install --no-cache-dir openai-whisper -i ${PIP_INDEX_URL} \
+        --retries 5 --timeout 60
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime

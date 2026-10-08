@@ -246,8 +246,17 @@ class MilvusRAGService:
             logger.error("Failed to ingest seed data: %s", exc)
             return 0
 
-    def search(self, query: str, top_k: int = 5, category_filter: str = "") -> list[dict[str, Any]]:
-        """Search for relevant legal articles using vector similarity."""
+    def search(self, query: str, top_k: int = 5, category_filter: str = "",
+               exclude_sources: list[str] | None = None) -> list[dict[str, Any]]:
+        """Search for relevant legal articles using vector similarity.
+
+        Args:
+            exclude_sources: Optional list of source values to exclude from results
+                (e.g. ``["generated", "synthetic"]``).  The Milvus ``legal_articles``
+                collection does not carry a ``source`` field, so filtering is
+                attempted via the ``metadata`` JSON field when available, and
+                silently skipped otherwise.
+        """
         if not self._collection_ready:
             if not self.create_collection():
                 return []
@@ -262,7 +271,20 @@ class MilvusRAGService:
             query_embedding = _get_embeddings_sync([query])[0]
 
             search_params = {"metric_type": "COSINE", "params": {"nprobe": 64}}
-            expr = f'category == "{_sanitize_expr_value(category_filter)}"' if category_filter else None
+            conditions: list[str] = []
+            if category_filter:
+                conditions.append(f'category == "{_sanitize_expr_value(category_filter)}"')
+            if exclude_sources:
+                # legal_articles collection has no top-level ``source`` field;
+                # attempt to filter on metadata JSON ``source`` attribute.
+                sanitized = [_sanitize_expr_value(s) for s in exclude_sources if s]
+                if sanitized:
+                    csv = ", ".join(f'"{s}"' for s in sanitized)
+                    conditions.append(f'metadata["source"] not in [{csv}]')
+            expr = " and ".join(conditions) if conditions else None
+
+            if exclude_sources:
+                logger.debug("Provenance filter applied (article search): %s", expr)
 
             # 超采样：先多取，去重后截到 top_k，避免重复实体挤占结果位
             fetch_limit = max(top_k * _RETRIEVAL_OVERFETCH, top_k + 10)
@@ -421,8 +443,15 @@ class MilvusRAGService:
             return inserted
 
     def search_cases(self, query: str, top_k: int = 10,
-                     case_type: str = "", court_name: str = "") -> list[dict[str, Any]]:
-        """Semantic similarity search over embedded court cases."""
+                     case_type: str = "", court_name: str = "",
+                     exclude_sources: list[str] | None = None) -> list[dict[str, Any]]:
+        """Semantic similarity search over embedded court cases.
+
+        Args:
+            exclude_sources: Optional list of source values to exclude from results
+                (e.g. ``["generated", "synthetic"]``).  Filtered via the
+                ``metadata`` JSON field if present; silently skipped otherwise.
+        """
         if not self._ensure_connected():
             return []
         try:
@@ -443,6 +472,12 @@ class MilvusRAGService:
                 conditions.append(f'case_type == "{_sanitize_expr_value(case_type)}"')
             if court_name:
                 conditions.append(f'court_name == "{_sanitize_expr_value(court_name)}"')
+            if exclude_sources:
+                sanitized = [_sanitize_expr_value(s) for s in exclude_sources if s]
+                if sanitized:
+                    csv = ", ".join(f'"{s}"' for s in sanitized)
+                    conditions.append(f'metadata["source"] not in [{csv}]')
+                    logger.debug("Provenance filter applied (case search): metadata[\"source\"] not in %s", sanitized)
             expr = " and ".join(conditions) if conditions else None
 
             results = collection.search(

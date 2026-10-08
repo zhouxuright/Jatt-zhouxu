@@ -100,6 +100,8 @@ class CourtCase(Base, UUIDMixin, TimestampMixin):
     referenced_laws: Mapped[str] = mapped_column(Text, nullable=True)
     judgment_result: Mapped[str] = mapped_column(Text, nullable=True)
     tags: Mapped[str] = mapped_column(String(512), nullable=True)
+    source: Mapped[str] = mapped_column(String(128), nullable=True, index=True)
+    generation_method: Mapped[str] = mapped_column(String(32), nullable=True, default="real")
     doc_count: Mapped[int] = mapped_column(Integer, default=0)
 
     def __repr__(self) -> str:
@@ -140,6 +142,7 @@ class LegalQAPair(Base, UUIDMixin, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(String(128), nullable=True)
     source: Mapped[str] = mapped_column(String(128), nullable=True)
+    generation_method: Mapped[str] = mapped_column(String(32), nullable=True, default="real")
 
     def __repr__(self) -> str:
         return f"<LegalQAPair(law={self.law_name!r}, source={self.source!r})>"
@@ -161,6 +164,7 @@ class LegalKnowledgeEntry(Base, UUIDMixin, TimestampMixin):
     law_type: Mapped[str] = mapped_column(String(64), nullable=True)
     category: Mapped[str] = mapped_column(String(128), nullable=True)
     source: Mapped[str] = mapped_column(String(128), nullable=True)
+    generation_method: Mapped[str] = mapped_column(String(32), nullable=True, default="real")
     metadata_json: Mapped[str] = mapped_column(Text, nullable=True)
 
     def __repr__(self) -> str:

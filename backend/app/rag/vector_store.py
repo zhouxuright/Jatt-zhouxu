@@ -293,6 +293,7 @@ class VectorStoreManager:
         query: str,
         collection_name: str,
         top_k: int = 5,
+        filter_expr: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search for documents similar to the query.
 
@@ -300,6 +301,8 @@ class VectorStoreManager:
             query: The search query text.
             collection_name: Collection to search in.
             top_k: Number of results to return.
+            filter_expr: Optional Milvus/ChromaDB filter expression used to
+                restrict results (e.g. ``"metadata[\"source\"] not in [\"synthetic\"]"``).
 
         Returns:
             List of result dicts with keys: id, text, metadata, score.
@@ -308,6 +311,7 @@ class VectorStoreManager:
             query=query,
             collection_name=collection_name,
             top_k=top_k,
+            filter_expr=filter_expr,
         )
         return [{"id": r["id"], "text": r["text"], "metadata": r["metadata"]} for r in results]
 
@@ -316,6 +320,7 @@ class VectorStoreManager:
         query: str,
         collection_name: str,
         top_k: int = 5,
+        filter_expr: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search for similar documents with relevance scores.
 
@@ -336,17 +341,23 @@ class VectorStoreManager:
         query_embedding = await self._embedding_service.embed_query(query)
 
         if self.backend == "milvus":
-            return await self._milvus_search(collection_name, query_embedding, top_k)
+            return await self._milvus_search(collection_name, query_embedding, top_k, filter_expr=filter_expr)
         else:
-            return self._chroma_search(collection_name, query_embedding, top_k)
+            return self._chroma_search(collection_name, query_embedding, top_k, filter_expr=filter_expr)
 
     async def _milvus_search(
         self,
         collection_name: str,
         query_embedding: list[float],
         top_k: int,
+        filter_expr: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search a Milvus collection."""
+        """Search a Milvus collection.
+
+        Args:
+            filter_expr: Optional Milvus boolean expression to restrict results
+                (e.g. provenance filtering on ``metadata["source"]``).
+        """
         from pymilvus import Collection
 
         collection: Collection = self._collections[collection_name]
@@ -360,6 +371,7 @@ class VectorStoreManager:
             param=search_params,
             limit=top_k,
             output_fields=["id", "text", "metadata"],
+            expr=filter_expr,
         )
 
         return [
@@ -377,12 +389,39 @@ class VectorStoreManager:
         collection_name: str,
         query_embedding: list[float],
         top_k: int,
+        filter_expr: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search a ChromaDB collection."""
+        """Search a ChromaDB collection.
+
+        Args:
+            filter_expr: Optional filter expression.  ChromaDB only supports a
+                limited subset of Milvus-style expressions; unsupported
+                expressions are logged and ignored.
+        """
         collection = self._collections[collection_name]
+        where_filter = None
+        if filter_expr:
+            # ChromaDB's filter language differs from Milvus; attempt a
+            # best-effort translation for simple provenance filters only.
+            try:
+                # Very small translator: handle ``metadata["source"] not in [...]``
+                import re as _re
+                m = _re.search(
+                    r'metadata\["source"\]\s+not\s+in\s+\[([^\]]+)\]',
+                    filter_expr,
+                )
+                if m:
+                    raw_values = [v.strip().strip('"').strip("'") for v in m.group(1).split(",")]
+                    where_filter = {"source": {"$nin": raw_values}}
+                else:
+                    logger.debug("Unsupported ChromaDB filter_expr, ignoring: %s", filter_expr)
+            except Exception as exc:
+                logger.warning("Failed to translate filter_expr for ChromaDB: %s", exc)
+
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
+            where=where_filter,
             include=["documents", "metadatas", "distances"],
         )
 

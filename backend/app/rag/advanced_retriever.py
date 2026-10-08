@@ -345,6 +345,9 @@ class AdvancedRAGPipeline:
         For million-scale data, we load a representative sample rather
         than the full set (which would be too large for in-memory BM25).
 
+        Synthetic / generated data is excluded so that BM25 candidates
+        are drawn only from real legal content.
+
         Note: This method uses asyncio.run() which will fail if called from
         within an already-running event loop. In that case, it returns [] and
         the caller falls back to seed data. The RAG pipeline should be
@@ -380,9 +383,14 @@ class AdvancedRAGPipeline:
 
             logger.info("Found %d articles in DB, loading %d for BM25 index", count, min(count, limit))
 
+            # Check whether the ``source`` column exists on LegalArticle so the
+            # provenance filter degrades gracefully on older schemas that have
+            # not yet been migrated.
+            has_source_col = hasattr(LegalArticle, "source")
+
             async def _load():
                 async with async_session_factory() as session:
-                    result = await session.execute(
+                    stmt = (
                         select(
                             LegalArticle.id,
                             LegalArticle.article_number,
@@ -394,8 +402,14 @@ class AdvancedRAGPipeline:
                             Law.law_type,
                         )
                         .join(Law, LegalArticle.law_id == Law.id)
-                        .limit(limit)
                     )
+                    if has_source_col:
+                        stmt = stmt.where(
+                            (LegalArticle.source.is_(None))
+                            | (LegalArticle.source.notin_(["generated", "synthetic"]))
+                        )
+                    stmt = stmt.limit(limit)
+                    result = await session.execute(stmt)
                     docs = []
                     for row in result.all():
                         docs.append({
@@ -468,7 +482,10 @@ class AdvancedRAGPipeline:
                 from app.rag.milvus_service import get_milvus_rag_service
                 service = get_milvus_rag_service()
                 service.create_collection()
-                vector_results = service.search(query, top_k=top_k * 3)
+                vector_results = service.search(
+                    query, top_k=top_k * 3,
+                    exclude_sources=["generated", "synthetic"],
+                )
                 if vector_results:
                     logger.info("Milvus vector: found %d results (top score: %.3f)",
                                len(vector_results), vector_results[0].get("score", 0))

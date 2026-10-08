@@ -3,7 +3,7 @@
     <!-- 侧边栏 -->
     <el-aside :width="isCollapsed ? '64px' : '240px'" class="app-sidebar">
       <div class="sidebar-header">
-        <div class="logo-area" @click="router.push('/chat')">
+        <div class="logo-area" @click="router.push('/dashboard')">
           <el-icon :size="24" color="#fff"><ScaleToOriginal /></el-icon>
           <span v-show="!isCollapsed" class="logo-text">法律智能辅助</span>
         </div>
@@ -19,56 +19,81 @@
         router
         class="sidebar-menu"
       >
-        <el-menu-item index="/chat">
-          <el-icon><ChatDotRound /></el-icon>
-          <template #title>智能对话</template>
+        <el-menu-item index="/dashboard">
+          <el-icon><Odometer /></el-icon>
+          <template #title>工作台</template>
         </el-menu-item>
-        <el-menu-item index="/contract-review">
-          <el-icon><Document /></el-icon>
-          <template #title>合同审查</template>
-        </el-menu-item>
-        <el-menu-item index="/document-generate">
-          <el-icon><EditPen /></el-icon>
-          <template #title>文书生成</template>
-        </el-menu-item>
-        <el-menu-item index="/batch-upload">
-          <el-icon><UploadFilled /></el-icon>
-          <template #title>批量处理</template>
-        </el-menu-item>
-        <el-menu-item index="/law-search">
-          <el-icon><Search /></el-icon>
-          <template #title>法规检索</template>
-        </el-menu-item>
-        <el-menu-item index="/case-search">
-          <el-icon><Files /></el-icon>
-          <template #title>案例检索</template>
-        </el-menu-item>
-        <el-menu-item index="/deep-think">
-          <el-icon><Cpu /></el-icon>
-          <template #title>深度推理</template>
-        </el-menu-item>
-        <el-menu-item index="/skills">
-          <el-icon><SetUp /></el-icon>
-          <template #title>技能包</template>
-        </el-menu-item>
+
+        <el-menu-item-group>
+          <template #title>AI 助手</template>
+          <el-menu-item index="/chat">
+            <el-icon><ChatDotRound /></el-icon>
+            <template #title>智能对话</template>
+          </el-menu-item>
+          <!-- 深度推理已并入智能对话工具栏的「深度思考」开关（/deep-think 路由保留兼容旧链接） -->
+          <el-menu-item index="/skills">
+            <el-icon><SetUp /></el-icon>
+            <template #title>技能包</template>
+          </el-menu-item>
+        </el-menu-item-group>
+
+        <el-menu-item-group>
+          <template #title>文档中心</template>
+          <el-menu-item index="/contract-review">
+            <el-icon><Document /></el-icon>
+            <template #title>合同审查</template>
+          </el-menu-item>
+          <el-menu-item index="/document-generate">
+            <el-icon><EditPen /></el-icon>
+            <template #title>文书生成</template>
+          </el-menu-item>
+          <el-menu-item index="/batch-upload">
+            <el-icon><UploadFilled /></el-icon>
+            <template #title>批量处理</template>
+          </el-menu-item>
+          <el-menu-item index="/contract-lifecycle">
+            <el-icon><Tickets /></el-icon>
+            <template #title>合同管理</template>
+          </el-menu-item>
+        </el-menu-item-group>
+
+        <el-menu-item-group>
+          <template #title>检索</template>
+          <el-menu-item index="/law-search">
+            <el-icon><Search /></el-icon>
+            <template #title>法规检索</template>
+          </el-menu-item>
+          <el-menu-item index="/case-search">
+            <el-icon><Files /></el-icon>
+            <template #title>案例检索</template>
+          </el-menu-item>
+        </el-menu-item-group>
+
+        <el-menu-item-group>
+          <template #title>诉讼与合规</template>
+          <el-menu-item index="/litigation">
+            <el-icon><Sort /></el-icon>
+            <template #title>诉讼支持</template>
+          </el-menu-item>
+          <el-menu-item index="/compliance">
+            <el-icon><Lock /></el-icon>
+            <template #title>合规管理</template>
+          </el-menu-item>
+        </el-menu-item-group>
+
+        <el-menu-item-group>
+          <template #title>系统</template>
+          <el-menu-item index="/data-governance">
+            <el-icon><DataLine /></el-icon>
+            <template #title>数据资产治理</template>
+          </el-menu-item>
+          <el-menu-item index="/profile">
+            <el-icon><User /></el-icon>
+            <template #title>个人中心</template>
+          </el-menu-item>
+        </el-menu-item-group>
         <!-- 工具调用已移入管理区（详见 router/index.ts 注释）：它是调试界面，
              会展示原始 JSON 与 demo_mode 占位数据，不适合出现在律师的主菜单。 -->
-        <el-menu-item index="/litigation">
-          <el-icon><Sort /></el-icon>
-          <template #title>诉讼支持</template>
-        </el-menu-item>
-        <el-menu-item index="/compliance">
-          <el-icon><Lock /></el-icon>
-          <template #title>合规管理</template>
-        </el-menu-item>
-        <el-menu-item index="/contract-lifecycle">
-          <el-icon><Tickets /></el-icon>
-          <template #title>合同管理</template>
-        </el-menu-item>
-        <el-menu-item index="/data-governance">
-          <el-icon><DataLine /></el-icon>
-          <template #title>数据资产治理</template>
-        </el-menu-item>
       </el-menu>
 
       <div class="sidebar-footer">
@@ -84,10 +109,6 @@
           <el-menu-item v-if="isAdmin" index="/admin/tools">
             <el-icon><Connection /></el-icon>
             <template #title>工具调用（管理）</template>
-          </el-menu-item>
-          <el-menu-item index="/profile">
-            <el-icon><User /></el-icon>
-            <template #title>个人中心</template>
           </el-menu-item>
         </el-menu>
         <div class="collapse-btn" @click="isCollapsed = !isCollapsed">
@@ -152,23 +173,25 @@ watch(isCollapsed, (val) => localStorage.setItem('sidebar-collapsed', String(val
 
 const activeMenu = computed(() => {
   const path = route.path
+  if (path.startsWith('/dashboard')) return '/dashboard'
   if (path.startsWith('/chat')) return '/chat'
   if (path.startsWith('/contract-review')) return '/contract-review'
   if (path.startsWith('/document-generate')) return '/document-generate'
   if (path.startsWith('/batch-upload')) return '/batch-upload'
   if (path.startsWith('/law-search')) return '/law-search'
   if (path.startsWith('/case-search')) return '/case-search'
-  if (path.startsWith('/deep-think')) return '/deep-think'
+  if (path.startsWith('/deep-think')) return '/chat' // 已并入对话入口
   if (path.startsWith('/skills')) return '/skills'
   // 工具调用已移入 /admin/tools（见 router/index.ts）：这里必须用完整路径匹配，
-  // 因为 '/admin/tools'.startsWith('/tools') 为 false，会一路落到 return '/chat'，
-  // 结果管理员打开工具页时侧边栏高亮的是"智能对话"。
+  // 因为 '/admin/tools'.startsWith('/tools') 为 false，会一路落到 return '/dashboard'，
+  // 结果管理员打开工具页时侧边栏高亮的是"工作台"。
   if (path.startsWith('/admin/tools')) return '/admin/tools'
   if (path.startsWith('/litigation')) return '/litigation'
   if (path.startsWith('/compliance')) return '/compliance'
   if (path.startsWith('/contract-lifecycle')) return '/contract-lifecycle'
+  if (path.startsWith('/data-governance')) return '/data-governance'
   if (path.startsWith('/profile') || path.startsWith('/feedback')) return '/profile'
-  return '/chat'
+  return '/dashboard'
 })
 
 const pageTitle = computed(() => (route.meta.title as string) || '法律智能辅助系统')
@@ -239,6 +262,20 @@ function handleUserCommand(command: string) {
 
 .sidebar-menu .el-menu-item.is-active {
   background-color: rgba(255, 255, 255, 0.15) !important;
+}
+
+/* 分组标题：小号淡色标签，收起时隐藏（Element Plus 收起态仍占位，需手动压掉） */
+.sidebar-menu :deep(.el-menu-item-group__title) {
+  padding: 10px 0 4px 20px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: rgba(160, 196, 232, 0.55) !important;
+}
+
+.sidebar-menu.el-menu--collapse :deep(.el-menu-item-group__title) {
+  padding: 0;
+  height: 0;
+  overflow: hidden;
 }
 
 .sidebar-footer {

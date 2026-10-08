@@ -103,7 +103,7 @@ async function handleLogin() {
 
     // Step 3: Navigate after login is fully complete
     // Use nextTick-equivalent: small delay to ensure store state is committed
-    const redirect = (route.query.redirect as string) || '/chat'
+    const redirect = (route.query.redirect as string) || '/dashboard'
     await router.push(redirect)
   } catch {
     // Error already handled by axios interceptor

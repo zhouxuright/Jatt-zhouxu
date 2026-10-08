@@ -12,6 +12,7 @@ from app.api.v1.chat import router as chat_router
 from app.api.v1.collaboration import router as collaboration_router
 from app.api.v1.contract import router as contract_router
 from app.api.v1.data_expansion import router as data_expansion_router
+from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.deep_think import router as deep_think_router
 from app.api.v1.document import router as document_router
 from app.api.v1.feedback import router as feedback_router
@@ -38,6 +39,7 @@ router.include_router(feedback_router, prefix="/feedback", tags=["Feedback"])
 router.include_router(law_router, prefix="/law", tags=["Law Search"])
 router.include_router(cases_router, prefix="/cases", tags=["Case Retrieval"])
 router.include_router(analytics_router, prefix="/analytics", tags=["Analytics"])
+router.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
 router.include_router(tasks_router, prefix="/tasks", tags=["Async Tasks"])
 router.include_router(knowledge_router, prefix="/knowledge", tags=["Knowledge Graph"])
 router.include_router(collaboration_router, prefix="/collaboration", tags=["Multi-Agent Collaboration"])
@@ -79,4 +81,4 @@ router.include_router(compliance_router, prefix="", tags=["Compliance Risk"],
                       dependencies=_auth)
 router.include_router(enterprise_router, prefix="", tags=["Enterprise"],
                       dependencies=_auth)
-router.include_router(batch_router, prefix="/batch", tags=["Batch Upload"])
+router.include_router(batch_router, tags=["Batch Upload"])

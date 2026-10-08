@@ -65,6 +65,15 @@
 
       <!-- 消息列表 -->
       <div v-else class="message-area">
+        <!-- 会话工具栏：标题 + 导出 -->
+        <div class="message-toolbar">
+          <span class="toolbar-conv-title truncate">
+            {{ chatStore.currentConversation?.title || '当前对话' }}
+          </span>
+          <el-button size="small" text type="primary" :icon="Download" @click="exportMarkdown">
+            导出 Markdown
+          </el-button>
+        </div>
         <div
           v-for="msg in chatStore.currentMessages"
           :key="msg.id"
@@ -279,7 +288,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Promotion, Close } from '@element-plus/icons-vue'
+import { Promotion, Close, Download } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
 import ChatSidebar from '@/components/ChatSidebar.vue'
 import ChatMessage from '@/components/ChatMessage.vue'
@@ -335,6 +344,12 @@ const quickQuestions = [
   '如何起草一份有效的借条？',
   '公司股权转让需要注意什么？',
   '离婚财产如何分割？',
+  '民间借贷利息的法律上限是多少？',
+  '劳动合同试用期最长可以约定多久？',
+  '定金和违约金可以同时主张吗？',
+  '网购商品七天无理由退货有哪些例外？',
+  '肖像权被侵犯该如何维权？',
+  '民事起诉状应当包含哪些内容？',
 ]
 
 onMounted(() => {
@@ -558,6 +573,45 @@ function handleQuickQuestion(question: string) {
   handleSend()
 }
 
+/** 导出当前会话为 Markdown 文件（商业产品标配的会话沉淀能力）。 */
+function exportMarkdown() {
+  const msgs = chatStore.currentMessages.filter(m => m.role === 'user' || m.role === 'assistant')
+  if (msgs.length === 0) {
+    ElMessage.warning('当前对话没有可导出的消息')
+    return
+  }
+  const conv = chatStore.currentConversation
+  const lines: string[] = []
+  lines.push(`# ${conv?.title || '法律智能对话记录'}`)
+  lines.push('')
+  lines.push(`> 导出时间：${new Date().toLocaleString('zh-CN')}`)
+  lines.push('')
+
+  let turn = 0
+  for (const m of msgs) {
+    if (m.role === 'user') {
+      turn++
+      lines.push(`## 提问 ${turn}`)
+    } else {
+      lines.push(`## AI 回答 ${turn}`)
+    }
+    lines.push('')
+    lines.push(m.content)
+    lines.push('')
+  }
+  lines.push('---')
+  lines.push('*本记录由法律智能辅助系统生成，内容仅供参考，不构成正式法律意见。*')
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${(conv?.title || '对话记录').replace(/[\\/:*?"<>|]/g, '_')}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+  ElMessage.success('已导出 Markdown 文件')
+}
+
 function handleFeedback(messageId: string, type: 'like' | 'dislike') {
   chatStore.setFeedback(messageId, type)
 }
@@ -655,7 +709,27 @@ function handleFollowUp(question: string) {
 .message-area {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 24px;
+  padding: 0 24px 16px;
+}
+
+.message-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 4px;
+  margin-bottom: 8px;
+  background: linear-gradient(var(--bg-color) 82%, transparent);
+}
+
+.toolbar-conv-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-regular);
+  min-width: 0;
 }
 
 .typing-indicator {
