@@ -271,14 +271,17 @@ class MilvusRAGService:
             query_embedding = _get_embeddings_sync([query])[0]
 
             search_params = {"metric_type": "COSINE", "params": {"nprobe": 64}}
+            field_names = {f.name for f in collection.schema.fields}
             conditions: list[str] = []
             if category_filter:
                 conditions.append(f'category == "{_sanitize_expr_value(category_filter)}"')
             if exclude_sources:
                 # legal_articles collection has no top-level ``source`` field;
-                # attempt to filter on metadata JSON ``source`` attribute.
+                # filter on the metadata JSON ``source`` attribute only when the
+                # schema actually carries a ``metadata`` field — otherwise Milvus
+                # rejects the whole query plan and the search returns nothing.
                 sanitized = [_sanitize_expr_value(s) for s in exclude_sources if s]
-                if sanitized:
+                if sanitized and "metadata" in field_names:
                     csv = ", ".join(f'"{s}"' for s in sanitized)
                     conditions.append(f'metadata["source"] not in [{csv}]')
             expr = " and ".join(conditions) if conditions else None
@@ -467,6 +470,7 @@ class MilvusRAGService:
             query_embedding = _get_embeddings_sync([query])[0]
             search_params = {"metric_type": "COSINE", "params": {"nprobe": 32}}
 
+            field_names = {f.name for f in collection.schema.fields}
             conditions = []
             if case_type:
                 conditions.append(f'case_type == "{_sanitize_expr_value(case_type)}"')
@@ -474,7 +478,7 @@ class MilvusRAGService:
                 conditions.append(f'court_name == "{_sanitize_expr_value(court_name)}"')
             if exclude_sources:
                 sanitized = [_sanitize_expr_value(s) for s in exclude_sources if s]
-                if sanitized:
+                if sanitized and "metadata" in field_names:
                     csv = ", ".join(f'"{s}"' for s in sanitized)
                     conditions.append(f'metadata["source"] not in [{csv}]')
                     logger.debug("Provenance filter applied (case search): metadata[\"source\"] not in %s", sanitized)
