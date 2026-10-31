@@ -3,6 +3,7 @@
 import csv
 import io
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -24,6 +25,8 @@ from app.models.tenant import Tenant, TenantStatus
 from app.models.user import User
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

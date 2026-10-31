@@ -184,17 +184,32 @@ class RequestLoggingMiddleware:
         client_ip = scope["client"][0] if scope.get("client") else None
         start = time.perf_counter()
         status_code = 500
+        response_started = False
 
         async def send_capture(message):
-            nonlocal status_code
+            nonlocal status_code, response_started
             if message["type"] == "http.response.start":
-                status_code = message.get("status_code", 500)
+                # ASGI 的响应起始消息字段名是 ``status``（不是 ``status_code``）；
+                # 读错键会永远取到默认值 500，把正常请求记成错误。
+                status_code = message.get("status", 500)
+                response_started = True
             await send(message)
 
         try:
             await self.app(scope, receive, send_capture)
-        except Exception:
-            status_code = 500
+        except Exception as exc:
+            # Do NOT rewrite an already-sent status. Streaming responses (SSE)
+            # start the response with 200 and may raise during post-stream
+            # cleanup (dependency teardown / generator aclose) *after* the
+            # client already received the full body. Reporting those as 500
+            # produced phantom 500s in the logs.
+            if not response_started:
+                status_code = 500
+            logging.getLogger("app.request").exception(
+                "unhandled error after response started=%s: %s",
+                response_started,
+                exc,
+            )
             raise
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)

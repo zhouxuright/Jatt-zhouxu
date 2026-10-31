@@ -3,8 +3,10 @@
 Uses hybrid search: full-text PostgreSQL search + AI summarization.
 """
 
+import asyncio
 import json
 import logging
+import time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -236,10 +238,14 @@ async def search_cases(
 # GET /cases/categories  (MUST be before /{case_id})
 # ---------------------------------------------------------------------------
 
-# Cache categories in memory — DISTINCT queries on 120k+ rows are expensive
-# and categories change rarely. TTL = 5 minutes.
+# Cache categories in memory — DISTINCT queries over millions of rows are
+# expensive and categories change rarely. TTL = 30 minutes. A module-level
+# lock keeps concurrent page loads from stampeding the DB with identical
+# full-table scans (that is what previously pushed this endpoint past the
+# frontend's 120s axios timeout).
 _categories_cache: dict[str, Any] = {"data": None, "timestamp": 0}
-_CATEGORIES_CACHE_TTL = 300  # 5 minutes
+_CATEGORIES_CACHE_TTL = 1800  # 30 minutes
+_categories_lock = asyncio.Lock()
 
 
 @router.get("/categories", response_model=CaseCategoriesResponse)
@@ -248,46 +254,48 @@ async def get_case_categories(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CaseCategoriesResponse:
     """Get available case categories (types, causes of action, courts)."""
-    import time
-
-    # Return cached result if still fresh
     now = time.time()
     if _categories_cache["data"] and (now - _categories_cache["timestamp"]) < _CATEGORIES_CACHE_TTL:
         return _categories_cache["data"]
 
-    # Get distinct case types
-    type_result = await db.execute(
-        select(func.distinct(CourtCase.case_type)).where(
-            CourtCase.case_type.isnot(None)
+    async with _categories_lock:
+        # 双重检查：等锁期间可能已被其它请求填充
+        now = time.time()
+        if _categories_cache["data"] and (now - _categories_cache["timestamp"]) < _CATEGORIES_CACHE_TTL:
+            return _categories_cache["data"]
+
+        # Get distinct case types
+        type_result = await db.execute(
+            select(func.distinct(CourtCase.case_type)).where(
+                CourtCase.case_type.isnot(None)
+            )
         )
-    )
-    case_types = [row[0] for row in type_result.all() if row[0]]
+        case_types = [row[0] for row in type_result.all() if row[0]]
 
-    # Get distinct causes of action
-    cause_result = await db.execute(
-        select(func.distinct(CourtCase.cause_of_action)).where(
-            CourtCase.cause_of_action.isnot(None)
+        # Get distinct causes of action
+        cause_result = await db.execute(
+            select(func.distinct(CourtCase.cause_of_action)).where(
+                CourtCase.cause_of_action.isnot(None)
+            )
         )
-    )
-    causes = [row[0] for row in cause_result.all() if row[0]]
+        causes = [row[0] for row in cause_result.all() if row[0]]
 
-    # Get distinct courts
-    court_result = await db.execute(
-        select(func.distinct(CourtCase.court_name)).where(
-            CourtCase.court_name.isnot(None)
+        # Get distinct courts
+        court_result = await db.execute(
+            select(func.distinct(CourtCase.court_name)).where(
+                CourtCase.court_name.isnot(None)
+            )
         )
-    )
-    courts = [row[0] for row in court_result.all() if row[0]]
+        courts = [row[0] for row in court_result.all() if row[0]]
 
-    response = CaseCategoriesResponse(
-        case_types=sorted(case_types),
-        causes_of_action=sorted(causes),
-        courts=sorted(courts),
-    )
+        response = CaseCategoriesResponse(
+            case_types=sorted(case_types),
+            causes_of_action=sorted(causes),
+            courts=sorted(courts),
+        )
 
-    # Cache the result
-    _categories_cache["data"] = response
-    _categories_cache["timestamp"] = now
+        _categories_cache["data"] = response
+        _categories_cache["timestamp"] = time.time()
 
     return response
 

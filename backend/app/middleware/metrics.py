@@ -144,7 +144,9 @@ class PrometheusMiddleware:
         async def send_capture(message):
             nonlocal status_code
             if message["type"] == "http.response.start":
-                status_code = message.get("status_code", 500)
+                # ASGI 响应起始消息使用 ``status`` 字段（读取 ``status_code``
+                # 会始终拿到默认值 500，使所有指标的 status 标签都是 500）。
+                status_code = message.get("status", 500)
             await send(message)
 
         try:

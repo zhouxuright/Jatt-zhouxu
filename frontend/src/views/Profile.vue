@@ -208,7 +208,7 @@ function feedbackCategoryLabel(category: string) {
 
 async function loadStats() {
   try {
-    const res = await analyticsApi.getDashboard()
+    const res = await analyticsApi.getDashboard({ scope: 'me' })
     const data = res.data
     stats.totalConversations = data.total_conversations || 0
     stats.totalMessages = data.total_messages || 0

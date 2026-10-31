@@ -356,7 +356,7 @@ class AdvancedRAGPipeline:
         from sqlalchemy import select, func
 
         try:
-            from app.core.database import async_session_factory
+            from app.core.config import settings
             from app.models.legal_knowledge import Law, LegalArticle
 
             # Check if we're inside an already-running event loop
@@ -369,60 +369,85 @@ class AdvancedRAGPipeline:
             except RuntimeError:
                 pass  # No running loop — safe to use asyncio.run()
 
-            async def _count():
-                async with async_session_factory() as session:
-                    result = await session.execute(
-                        select(func.count()).select_from(LegalArticle)
-                    )
-                    return result.scalar() or 0
+            # IMPORTANT: use a dedicated throwaway engine with NullPool instead
+            # of the app-global async_session_factory. asyncio.run() spins up a
+            # brand-new event loop; reusing the global engine would leave asyncpg
+            # connections created on that temporary loop inside the shared pool.
+            # After the temporary loop closes, the main loop picks those stale
+            # connections up and fails with "attached to a different loop" /
+            # "Event loop is closed" (surfacing as bogus 500s after the response
+            # has already been sent). A NullPool engine keeps every connection
+            # scoped to the temporary loop and is disposed before that loop ends.
+            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.pool import NullPool
 
-            count = asyncio.run(_count())
-
-            if count < 100:
-                return []
-
-            logger.info("Found %d articles in DB, loading %d for BM25 index", count, min(count, limit))
-
-            # Check whether the ``source`` column exists on LegalArticle so the
-            # provenance filter degrades gracefully on older schemas that have
-            # not yet been migrated.
-            has_source_col = hasattr(LegalArticle, "source")
-
-            async def _load():
-                async with async_session_factory() as session:
-                    stmt = (
-                        select(
-                            LegalArticle.id,
-                            LegalArticle.article_number,
-                            LegalArticle.content,
-                            LegalArticle.chapter,
-                            LegalArticle.tags,
-                            LegalArticle.law_id,
-                            Law.name,
-                            Law.law_type,
+            async def _load_docs() -> list[dict[str, Any]]:
+                engine = create_async_engine(
+                    settings.DATABASE_URL,
+                    poolclass=NullPool,
+                    echo=False,
+                )
+                session_factory = async_sessionmaker(
+                    bind=engine,
+                    expire_on_commit=False,
+                    autoflush=False,
+                )
+                try:
+                    async with session_factory() as session:
+                        result = await session.execute(
+                            select(func.count()).select_from(LegalArticle)
                         )
-                        .join(Law, LegalArticle.law_id == Law.id)
-                    )
-                    if has_source_col:
-                        stmt = stmt.where(
-                            (LegalArticle.source.is_(None))
-                            | (LegalArticle.source.notin_(["generated", "synthetic"]))
-                        )
-                    stmt = stmt.limit(limit)
-                    result = await session.execute(stmt)
-                    docs = []
-                    for row in result.all():
-                        docs.append({
-                            "law_name": row[6],
-                            "article_number": row[1],
-                            "content": row[2],
-                            "chapter": row[3] or "",
-                            "tags": row[4] or "",
-                            "category": row[7] or "其他",
-                        })
-                    return docs
+                        count = result.scalar() or 0
 
-            return asyncio.run(_load())
+                        if count < 100:
+                            return []
+
+                        logger.info(
+                            "Found %d articles in DB, loading %d for BM25 index",
+                            count, min(count, limit),
+                        )
+
+                        # Check whether the ``source`` column exists on
+                        # LegalArticle so the provenance filter degrades
+                        # gracefully on older schemas that have not yet been
+                        # migrated.
+                        has_source_col = hasattr(LegalArticle, "source")
+
+                        stmt = (
+                            select(
+                                LegalArticle.id,
+                                LegalArticle.article_number,
+                                LegalArticle.content,
+                                LegalArticle.chapter,
+                                LegalArticle.tags,
+                                LegalArticle.law_id,
+                                Law.name,
+                                Law.law_type,
+                            )
+                            .join(Law, LegalArticle.law_id == Law.id)
+                        )
+                        if has_source_col:
+                            stmt = stmt.where(
+                                (LegalArticle.source.is_(None))
+                                | (LegalArticle.source.notin_(["generated", "synthetic"]))
+                            )
+                        stmt = stmt.limit(limit)
+                        result = await session.execute(stmt)
+                        docs = []
+                        for row in result.all():
+                            docs.append({
+                                "law_name": row[6],
+                                "article_number": row[1],
+                                "content": row[2],
+                                "chapter": row[3] or "",
+                                "tags": row[4] or "",
+                                "category": row[7] or "其他",
+                            })
+                        return docs
+                finally:
+                    await engine.dispose()
+
+            return asyncio.run(_load_docs())
 
         except Exception as exc:
             logger.warning("Failed to load documents from DB for BM25: %s", exc)

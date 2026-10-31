@@ -36,9 +36,10 @@ ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 #
 # 因此先从 PyTorch 官方 CPU 索引装 torch（体积小一个数量级），
 # 之后 requirements.txt 看到 torch 已满足便不会再装 CUDA 版。
-# 版本与老镜像保持一致，避免引入行为变化。
-ARG TORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
-ARG TORCH_VERSION=2.14.0
+# 镜像源：download.pytorch.org 在境内实测仅 ~15 kB/s（3 小时以上），
+# 阿里云 pytorch-wheels 是**目录**而非 PEP 503 索引（--index-url 会报
+# "from versions: none"），因此直接指定 wheel 直链（实测 15 MB/s）。
+ARG TORCH_WHEEL_URL=https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp311-cp311-linux_x86_64.whl
 
 WORKDIR /app
 
@@ -60,8 +61,8 @@ RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir --upgrade pip -i ${PIP_INDEX_URL} \
         --retries 5 --timeout 60
 
-RUN /opt/venv/bin/pip install --no-cache-dir "torch==${TORCH_VERSION}" \
-        --index-url ${TORCH_CPU_INDEX} \
+RUN /opt/venv/bin/pip install --no-cache-dir "${TORCH_WHEEL_URL}" \
+        -i ${PIP_INDEX_URL} \
         --retries 5 --timeout 60
 
 # Copy requirements before installing them for better layer caching

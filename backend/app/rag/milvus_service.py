@@ -7,6 +7,7 @@ Provides:
 """
 
 import logging
+import threading
 from typing import Any
 
 from app.core.config import settings
@@ -22,6 +23,23 @@ from app.rag.milvus_schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+# =========================================================================
+# Process-wide serialization for Milvus client calls
+# =========================================================================
+# Runtime access goes through ``MilvusClient`` (pymilvus >= 2.4). The legacy ORM
+# API (``connections.connect`` / ``Collection`` / ``utility``) is deprecated in
+# pymilvus 3.x and its native compatibility shim hard-crashed the interpreter
+# (``Segmentation fault (core dumped)``) on the first ``has_collection`` call
+# after a cold start, which nginx then surfaced as a 502.
+#
+# ``MilvusClient`` holds one gRPC connection per instance; serializing calls
+# with a re-entrant lock keeps concurrent retrieval (FastAPI runs it in the
+# default ThreadPoolExecutor) safe and cheap relative to the network round trip.
+#
+# Embedding generation is deliberately kept OUTSIDE the lock: it is CPU-bound
+# and would otherwise serialize all queries behind one another.
+_MILVUS_LOCK = threading.RLock()
 
 # 集合名与字段长度统一来自 app.rag.milvus_schema（此处保留名称便于旧代码导入）
 LEGAL_CASES_COLLECTION = "legal_cases"
@@ -139,69 +157,86 @@ class MilvusRAGService:
     """Milvus-backed RAG service for legal knowledge retrieval."""
 
     def __init__(self) -> None:
-        self._connected = False
+        self._client: Any = None
         self._collection_ready = False
-        self._collection_loaded = False  # Track if collection is already in memory
+        self._articles_loaded = False  # 集合是否已 load 进查询内存
+        self._cases_loaded = False
 
     def _ensure_connected(self) -> bool:
-        if self._connected:
+        if self._client is not None:
             return True
-        try:
-            from pymilvus import connections
-            connections.connect(alias="default", host=settings.MILVUS_HOST, port=settings.MILVUS_PORT)
-            self._connected = True
-            return True
-        except Exception as exc:
-            logger.warning("Milvus connection failed: %s", exc)
-            return False
+        with _MILVUS_LOCK:
+            # Double-checked: another thread may have connected while we waited.
+            if self._client is not None:
+                return True
+            try:
+                from pymilvus import MilvusClient
+                uri = f"http://{settings.MILVUS_HOST}:{settings.MILVUS_PORT}"
+                self._client = MilvusClient(uri=uri, timeout=10)
+                logger.info("MilvusClient connected: %s", uri)
+                return True
+            except Exception as exc:
+                logger.warning("Milvus connection failed: %s", exc)
+                return False
 
     def create_collection(self) -> bool:
         """Create the legal_articles collection in Milvus."""
         if not self._ensure_connected():
             return False
-        try:
-            from pymilvus import CollectionSchema, DataType, FieldSchema, utility, Collection
+        with _MILVUS_LOCK:
+            return self._create_collection_locked()
 
-            if utility.has_collection(LEGAL_ARTICLES_COLLECTION):
+    def _create_collection_locked(self) -> bool:
+        try:
+            from pymilvus import DataType
+
+            client = self._client
+            if client.has_collection(LEGAL_ARTICLES_COLLECTION):
                 self._collection_ready = True
                 return True
 
             # 字段长度统一取自 milvus_schema（按 UTF-8 字节，中文 1 字 = 3 字节）。
             # 切勿在此硬编码：历史硬编码为 law_name=256 / content=8192，
             # 导致 483 条超长法条永远无法写入向量库。
-            fields = [
-                FieldSchema(
-                    name="id", dtype=DataType.VARCHAR, is_primary=True,
-                    max_length=LEGAL_ARTICLE_ID_MAX,
-                ),
-                FieldSchema(
-                    name="law_name", dtype=DataType.VARCHAR,
-                    max_length=LEGAL_ARTICLE_LAW_NAME_MAX,
-                ),
-                FieldSchema(
-                    name="article_number", dtype=DataType.VARCHAR,
-                    max_length=LEGAL_ARTICLE_ARTICLE_NUMBER_MAX,
-                ),
-                FieldSchema(
-                    name="content", dtype=DataType.VARCHAR,
-                    max_length=LEGAL_ARTICLE_CONTENT_MAX,
-                ),
-                FieldSchema(
-                    name="tags", dtype=DataType.VARCHAR,
-                    max_length=LEGAL_ARTICLE_TAGS_MAX,
-                ),
-                FieldSchema(
-                    name="category", dtype=DataType.VARCHAR,
-                    max_length=LEGAL_ARTICLE_CATEGORY_MAX,
-                ),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
-            ]
-            schema = CollectionSchema(fields=fields, description="Chinese legal articles for RAG")
-            collection = Collection(name=LEGAL_ARTICLES_COLLECTION, schema=schema)
+            schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
+            schema.add_field(
+                field_name="id", datatype=DataType.VARCHAR, is_primary=True,
+                max_length=LEGAL_ARTICLE_ID_MAX,
+            )
+            schema.add_field(
+                field_name="law_name", datatype=DataType.VARCHAR,
+                max_length=LEGAL_ARTICLE_LAW_NAME_MAX,
+            )
+            schema.add_field(
+                field_name="article_number", datatype=DataType.VARCHAR,
+                max_length=LEGAL_ARTICLE_ARTICLE_NUMBER_MAX,
+            )
+            schema.add_field(
+                field_name="content", datatype=DataType.VARCHAR,
+                max_length=LEGAL_ARTICLE_CONTENT_MAX,
+            )
+            schema.add_field(
+                field_name="tags", datatype=DataType.VARCHAR,
+                max_length=LEGAL_ARTICLE_TAGS_MAX,
+            )
+            schema.add_field(
+                field_name="category", datatype=DataType.VARCHAR,
+                max_length=LEGAL_ARTICLE_CATEGORY_MAX,
+            )
+            schema.add_field(
+                field_name="embedding", datatype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM,
+            )
 
-            index_params = {"index_type": "IVF_FLAT", "metric_type": "COSINE", "params": {"nlist": 2048}}
-            collection.create_index(field_name="embedding", index_params=index_params)
-            collection.load()
+            index_params = client.prepare_index_params()
+            index_params.add_index(
+                field_name="embedding", index_type="IVF_FLAT",
+                metric_type="COSINE", params={"nlist": 2048},
+            )
+            client.create_collection(
+                collection_name=LEGAL_ARTICLES_COLLECTION,
+                schema=schema,
+                index_params=index_params,
+            )
 
             self._collection_ready = True
             logger.info("Created Milvus collection '%s'", LEGAL_ARTICLES_COLLECTION)
@@ -215,32 +250,37 @@ class MilvusRAGService:
         if not self._collection_ready:
             if not self.create_collection():
                 return 0
-        try:
-            from pymilvus import Collection
-            collection = Collection(LEGAL_ARTICLES_COLLECTION)
-            collection.load()
+        with _MILVUS_LOCK:
+            return self._ingest_seed_data_locked()
 
-            if collection.num_entities > 0:
-                logger.info("Collection already has %d entities", collection.num_entities)
-                return collection.num_entities
+    def _ingest_seed_data_locked(self) -> int:
+        try:
+            client = self._client
+            count = int(client.get_collection_stats(LEGAL_ARTICLES_COLLECTION).get("row_count", 0))
+            if count > 0:
+                logger.info("Collection already has %d entities", count)
+                return count
 
             logger.info("Generating embeddings for %d articles...", len(SEED_LEGAL_ARTICLES))
             texts = [art["content"] for art in SEED_LEGAL_ARTICLES]
             embeddings = _get_embeddings_sync(texts)
 
-            ids = [f"legal_{i:03d}" for i in range(len(SEED_LEGAL_ARTICLES))]
-            law_names = [art["law_name"] for art in SEED_LEGAL_ARTICLES]
-            article_numbers = [art["article_number"] for art in SEED_LEGAL_ARTICLES]
-            contents = [art["content"] for art in SEED_LEGAL_ARTICLES]
-            tags_list = [art["tags"] for art in SEED_LEGAL_ARTICLES]
-            categories = [art["category"] for art in SEED_LEGAL_ARTICLES]
+            rows = [
+                {
+                    "id": f"legal_{i:03d}",
+                    "law_name": art["law_name"],
+                    "article_number": art["article_number"],
+                    "content": art["content"],
+                    "tags": art["tags"],
+                    "category": art["category"],
+                    "embedding": embeddings[i],
+                }
+                for i, art in enumerate(SEED_LEGAL_ARTICLES)
+            ]
+            client.insert(LEGAL_ARTICLES_COLLECTION, rows)
+            client.flush(LEGAL_ARTICLES_COLLECTION)
 
-            data = [ids, law_names, article_numbers, contents, tags_list, categories, embeddings]
-            collection.insert(data)
-            collection.flush()
-            collection.load()
-
-            count = collection.num_entities
+            count = int(client.get_collection_stats(LEGAL_ARTICLES_COLLECTION).get("row_count", 0))
             logger.info("Ingested %d legal articles into Milvus", count)
             return count
         except Exception as exc:
@@ -261,21 +301,43 @@ class MilvusRAGService:
         if not self._collection_ready:
             if not self.create_collection():
                 return []
-        try:
-            from pymilvus import Collection
-            collection = Collection(LEGAL_ARTICLES_COLLECTION)
-            # Only load collection into memory if not already loaded
-            if not self._collection_loaded:
-                collection.load()
-                self._collection_loaded = True
 
-            if collection.num_entities == 0:
+        # Embedding is CPU-bound and does not touch PyMilvus state, so compute it
+        # before acquiring the lock — otherwise every query would serialize on
+        # model inference as well as on the native client.
+        try:
+            query_embedding = _get_embeddings_sync([query])[0]
+        except Exception as exc:
+            logger.error("Milvus search embedding failed: %s", exc)
+            return []
+
+        with _MILVUS_LOCK:
+            return self._search_locked(
+                query_embedding, top_k, category_filter, exclude_sources,
+            )
+
+    def _search_locked(
+        self,
+        query_embedding: list[float],
+        top_k: int,
+        category_filter: str,
+        exclude_sources: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        try:
+            client = self._client
+            if not self._articles_loaded:
+                client.load_collection(LEGAL_ARTICLES_COLLECTION)
+                self._articles_loaded = True
+
+            count = int(client.get_collection_stats(LEGAL_ARTICLES_COLLECTION).get("row_count", 0))
+            if count == 0:
                 return []
 
-            query_embedding = _get_embeddings_sync([query])[0]
-
             search_params = {"metric_type": "COSINE", "params": {"nprobe": 64}}
-            field_names = {f.name for f in collection.schema.fields}
+            field_names = {
+                f.get("name")
+                for f in client.describe_collection(LEGAL_ARTICLES_COLLECTION).get("fields", [])
+            }
             conditions: list[str] = []
             if category_filter:
                 conditions.append(f'category == "{_sanitize_expr_value(category_filter)}"')
@@ -288,31 +350,33 @@ class MilvusRAGService:
                 if sanitized and "metadata" in field_names:
                     csv = ", ".join(f'"{s}"' for s in sanitized)
                     conditions.append(f'metadata["source"] not in [{csv}]')
-            expr = " and ".join(conditions) if conditions else None
+            expr = " and ".join(conditions)
 
             if exclude_sources:
-                logger.debug("Provenance filter applied (article search): %s", expr)
+                logger.debug("Provenance filter applied (article search): %s", expr or "<none>")
 
             # 超采样：先多取，去重后截到 top_k，避免重复实体挤占结果位
             fetch_limit = max(top_k * _RETRIEVAL_OVERFETCH, top_k + 10)
-            results = collection.search(
+            results = client.search(
+                collection_name=LEGAL_ARTICLES_COLLECTION,
                 data=[query_embedding],
                 anns_field="embedding",
-                param=search_params,
+                search_params=search_params,
                 limit=fetch_limit,
+                filter=expr,
                 output_fields=["law_name", "article_number", "content", "tags", "category"],
-                expr=expr,
             )
 
             formatted = []
             for hit in results[0]:
+                ent = hit.get("entity", {})
                 formatted.append({
-                    "law_name": hit.entity.get("law_name", ""),
-                    "article_number": hit.entity.get("article_number", ""),
-                    "content": hit.entity.get("content", ""),
-                    "tags": hit.entity.get("tags", ""),
-                    "category": hit.entity.get("category", ""),
-                    "score": float(hit.distance),
+                    "law_name": ent.get("law_name", ""),
+                    "article_number": ent.get("article_number", ""),
+                    "content": ent.get("content", ""),
+                    "tags": ent.get("tags", ""),
+                    "category": ent.get("category", ""),
+                    "score": float(hit.get("distance", 0.0)),
                     "source": "milvus_vector",
                 })
             return _dedup_hits(
@@ -334,16 +398,16 @@ class MilvusRAGService:
             # "未初始化"（VectorDB 明明可用）。故先尝试惰性初始化。
             if not self.create_collection():
                 return {"status": "not_initialized", "count": 0}
-        try:
-            from pymilvus import Collection
-            collection = Collection(LEGAL_ARTICLES_COLLECTION)
-            # Only load if not already in memory
-            if not self._collection_loaded:
-                collection.load()
-                self._collection_loaded = True
-            return {"status": "ready", "collection": LEGAL_ARTICLES_COLLECTION, "count": collection.num_entities, "dimension": EMBEDDING_DIM}
-        except Exception as exc:
-            return {"status": "error", "error": str(exc)}
+        with _MILVUS_LOCK:
+            try:
+                client = self._client
+                if not self._articles_loaded:
+                    client.load_collection(LEGAL_ARTICLES_COLLECTION)
+                    self._articles_loaded = True
+                count = int(client.get_collection_stats(LEGAL_ARTICLES_COLLECTION).get("row_count", 0))
+                return {"status": "ready", "collection": LEGAL_ARTICLES_COLLECTION, "count": count, "dimension": EMBEDDING_DIM}
+            except Exception as exc:
+                return {"status": "error", "error": str(exc)}
 
 
     # =========================================================================
@@ -354,30 +418,39 @@ class MilvusRAGService:
         """Create the legal_cases collection if it does not exist."""
         if not self._ensure_connected():
             return False
-        try:
-            from pymilvus import CollectionSchema, DataType, FieldSchema, utility, Collection
+        with _MILVUS_LOCK:
+            return self._ensure_case_collection_locked()
 
-            if utility.has_collection(LEGAL_CASES_COLLECTION):
+    def _ensure_case_collection_locked(self) -> bool:
+        try:
+            from pymilvus import DataType
+
+            client = self._client
+            if client.has_collection(LEGAL_CASES_COLLECTION):
                 return True
 
-            fields = [
-                FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=64),
-                FieldSchema(name="case_number", dtype=DataType.VARCHAR, max_length=128),
-                FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=512),
-                FieldSchema(name="court_name", dtype=DataType.VARCHAR, max_length=256),
-                FieldSchema(name="case_type", dtype=DataType.VARCHAR, max_length=64),
-                FieldSchema(name="cause_of_action", dtype=DataType.VARCHAR, max_length=256),
-                FieldSchema(name="decision_date", dtype=DataType.VARCHAR, max_length=32),
-                FieldSchema(name="summary", dtype=DataType.VARCHAR, max_length=8192),
-                FieldSchema(name="tags", dtype=DataType.VARCHAR, max_length=512),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
-            ]
-            schema = CollectionSchema(fields=fields, description="Court cases for semantic similarity search")
-            collection = Collection(name=LEGAL_CASES_COLLECTION, schema=schema)
+            schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
+            schema.add_field(field_name="id", datatype=DataType.VARCHAR, is_primary=True, max_length=64)
+            schema.add_field(field_name="case_number", datatype=DataType.VARCHAR, max_length=128)
+            schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=512)
+            schema.add_field(field_name="court_name", datatype=DataType.VARCHAR, max_length=256)
+            schema.add_field(field_name="case_type", datatype=DataType.VARCHAR, max_length=64)
+            schema.add_field(field_name="cause_of_action", datatype=DataType.VARCHAR, max_length=256)
+            schema.add_field(field_name="decision_date", datatype=DataType.VARCHAR, max_length=32)
+            schema.add_field(field_name="summary", datatype=DataType.VARCHAR, max_length=8192)
+            schema.add_field(field_name="tags", datatype=DataType.VARCHAR, max_length=512)
+            schema.add_field(field_name="embedding", datatype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM)
 
-            index_params = {"index_type": "IVF_FLAT", "metric_type": "COSINE", "params": {"nlist": 512}}
-            collection.create_index(field_name="embedding", index_params=index_params)
-            collection.load()
+            index_params = client.prepare_index_params()
+            index_params.add_index(
+                field_name="embedding", index_type="IVF_FLAT",
+                metric_type="COSINE", params={"nlist": 512},
+            )
+            client.create_collection(
+                collection_name=LEGAL_CASES_COLLECTION,
+                schema=schema,
+                index_params=index_params,
+            )
             logger.info("Created Milvus case collection '%s'", LEGAL_CASES_COLLECTION)
             return True
         except Exception as exc:
@@ -388,19 +461,24 @@ class MilvusRAGService:
         """Return the set of case ids already embedded (for resumable ingestion)."""
         if not self._ensure_connected():
             return set()
-        try:
-            from pymilvus import Collection
-            if not self.ensure_case_collection():
+        with _MILVUS_LOCK:
+            try:
+                client = self._client
+                if not self._ensure_case_collection_locked():
+                    return set()
+                if not self._cases_loaded:
+                    client.load_collection(LEGAL_CASES_COLLECTION)
+                    self._cases_loaded = True
+                rows = client.query(
+                    collection_name=LEGAL_CASES_COLLECTION,
+                    filter="",
+                    output_fields=["id"],
+                    limit=limit,
+                )
+                return {r["id"] for r in rows}
+            except Exception as exc:
+                logger.warning("Failed to list case vector ids: %s", exc)
                 return set()
-            collection = Collection(LEGAL_CASES_COLLECTION)
-            collection.load()
-            rows = collection.query(
-                expr="", output_fields=["id"], limit=limit
-            )
-            return {r["id"] for r in rows}
-        except Exception as exc:
-            logger.warning("Failed to list case vector ids: %s", exc)
-            return set()
 
     def ingest_case_vectors(self, records: list[dict[str, Any]], batch_size: int = 64,
                             progress_cb: Any = None) -> int:
@@ -414,12 +492,22 @@ class MilvusRAGService:
             return 0
         if not self._ensure_connected() or not self.ensure_case_collection():
             return 0
-        try:
-            from pymilvus import Collection
-            collection = Collection(LEGAL_CASES_COLLECTION)
-            collection.load()
+        with _MILVUS_LOCK:
+            return self._ingest_case_vectors_locked(records, batch_size, progress_cb)
 
-            inserted = 0
+    def _ingest_case_vectors_locked(
+        self,
+        records: list[dict[str, Any]],
+        batch_size: int,
+        progress_cb: Any,
+    ) -> int:
+        inserted = 0
+        try:
+            client = self._client
+            if not self._cases_loaded:
+                client.load_collection(LEGAL_CASES_COLLECTION)
+                self._cases_loaded = True
+
             for start in range(0, len(records), batch_size):
                 batch = records[start:start + batch_size]
                 texts = [
@@ -428,24 +516,26 @@ class MilvusRAGService:
                 ]
                 embeddings = _get_embeddings_sync(texts)
 
-                data = [
-                    [str(r["id"])[:64] for r in batch],
-                    [_truncate_utf8(r.get("case_number") or "", 128) for r in batch],
-                    [_truncate_utf8(r.get("title") or "", 512) for r in batch],
-                    [_truncate_utf8(r.get("court_name") or "", 256) for r in batch],
-                    [_truncate_utf8(r.get("case_type") or "", 64) for r in batch],
-                    [_truncate_utf8(r.get("cause_of_action") or "", 256) for r in batch],
-                    [_truncate_utf8(r.get("decision_date") or "", 32) for r in batch],
-                    [_truncate_utf8(r.get("summary") or "", 8192) for r in batch],
-                    [_truncate_utf8(r.get("tags") or "", 512) for r in batch],
-                    embeddings,
+                rows = [
+                    {
+                        "id": str(r["id"])[:64],
+                        "case_number": _truncate_utf8(r.get("case_number") or "", 128),
+                        "title": _truncate_utf8(r.get("title") or "", 512),
+                        "court_name": _truncate_utf8(r.get("court_name") or "", 256),
+                        "case_type": _truncate_utf8(r.get("case_type") or "", 64),
+                        "cause_of_action": _truncate_utf8(r.get("cause_of_action") or "", 256),
+                        "decision_date": _truncate_utf8(r.get("decision_date") or "", 32),
+                        "summary": _truncate_utf8(r.get("summary") or "", 8192),
+                        "tags": _truncate_utf8(r.get("tags") or "", 512),
+                        "embedding": embeddings[i],
+                    }
+                    for i, r in enumerate(batch)
                 ]
-                collection.insert(data)
-                collection.flush()
+                client.insert(LEGAL_CASES_COLLECTION, rows)
+                client.flush(LEGAL_CASES_COLLECTION)
                 inserted += len(batch)
                 if progress_cb:
                     progress_cb(inserted, len(records))
-            collection.load()
             logger.info("Ingested %d case vectors into Milvus", inserted)
             return inserted
         except Exception as exc:
@@ -464,23 +554,44 @@ class MilvusRAGService:
         """
         if not self._ensure_connected():
             return []
+        if not self.ensure_case_collection():
+            return []
+
         try:
-            from pymilvus import Collection
-            if not self.ensure_case_collection():
-                return []
-            collection = Collection(LEGAL_CASES_COLLECTION)
-            # Only load on first use — subsequent calls find data already in memory
-            if not self._collection_loaded:
-                collection.load()
-                self._collection_loaded = True
-
-            if collection.num_entities == 0:
-                return []
-
             query_embedding = _get_embeddings_sync([query])[0]
+        except Exception as exc:
+            logger.error("Milvus case search embedding failed: %s", exc)
+            return []
+
+        with _MILVUS_LOCK:
+            return self._search_cases_locked(
+                query_embedding, top_k, case_type, court_name, exclude_sources,
+            )
+
+    def _search_cases_locked(
+        self,
+        query_embedding: list[float],
+        top_k: int,
+        case_type: str,
+        court_name: str,
+        exclude_sources: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        try:
+            client = self._client
+            if not self._cases_loaded:
+                client.load_collection(LEGAL_CASES_COLLECTION)
+                self._cases_loaded = True
+
+            count = int(client.get_collection_stats(LEGAL_CASES_COLLECTION).get("row_count", 0))
+            if count == 0:
+                return []
+
             search_params = {"metric_type": "COSINE", "params": {"nprobe": 32}}
 
-            field_names = {f.name for f in collection.schema.fields}
+            field_names = {
+                f.get("name")
+                for f in client.describe_collection(LEGAL_CASES_COLLECTION).get("fields", [])
+            }
             conditions = []
             if case_type:
                 conditions.append(f'case_type == "{_sanitize_expr_value(case_type)}"')
@@ -492,21 +603,22 @@ class MilvusRAGService:
                     csv = ", ".join(f'"{s}"' for s in sanitized)
                     conditions.append(f'metadata["source"] not in [{csv}]')
                     logger.debug("Provenance filter applied (case search): metadata[\"source\"] not in %s", sanitized)
-            expr = " and ".join(conditions) if conditions else None
+            expr = " and ".join(conditions)
 
-            results = collection.search(
+            results = client.search(
+                collection_name=LEGAL_CASES_COLLECTION,
                 data=[query_embedding],
                 anns_field="embedding",
-                param=search_params,
+                search_params=search_params,
                 limit=top_k,
+                filter=expr,
                 output_fields=["id", "case_number", "title", "court_name",
                                "case_type", "cause_of_action", "decision_date", "summary"],
-                expr=expr,
             )
 
             formatted = []
             for hit in results[0]:
-                ent = hit.entity
+                ent = hit.get("entity", {})
                 formatted.append({
                     "id": ent.get("id", ""),
                     "case_number": ent.get("case_number", ""),
@@ -516,7 +628,7 @@ class MilvusRAGService:
                     "cause_of_action": ent.get("cause_of_action", ""),
                     "decision_date": ent.get("decision_date", ""),
                     "summary": ent.get("summary", ""),
-                    "score": float(hit.distance),
+                    "score": float(hit.get("distance", 0.0)),
                     "source": "milvus_semantic",
                 })
             return formatted
@@ -528,16 +640,19 @@ class MilvusRAGService:
         """Stats for the legal_cases collection."""
         if not self._ensure_connected():
             return {"status": "unavailable", "count": 0}
-        try:
-            from pymilvus import Collection, utility
-            if not utility.has_collection(LEGAL_CASES_COLLECTION):
-                return {"status": "not_created", "count": 0}
-            collection = Collection(LEGAL_CASES_COLLECTION)
-            collection.load()
-            return {"status": "ready", "collection": LEGAL_CASES_COLLECTION,
-                    "count": collection.num_entities, "dimension": EMBEDDING_DIM}
-        except Exception as exc:
-            return {"status": "error", "error": str(exc)}
+        with _MILVUS_LOCK:
+            try:
+                client = self._client
+                if not client.has_collection(LEGAL_CASES_COLLECTION):
+                    return {"status": "not_created", "count": 0}
+                if not self._cases_loaded:
+                    client.load_collection(LEGAL_CASES_COLLECTION)
+                    self._cases_loaded = True
+                count = int(client.get_collection_stats(LEGAL_CASES_COLLECTION).get("row_count", 0))
+                return {"status": "ready", "collection": LEGAL_CASES_COLLECTION,
+                        "count": count, "dimension": EMBEDDING_DIM}
+            except Exception as exc:
+                return {"status": "error", "error": str(exc)}
 
 
 _milvus_rag_service: MilvusRAGService | None = None

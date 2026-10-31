@@ -90,6 +90,29 @@ async def _validate_uploaded_file(file: UploadFile) -> tuple[bytes, str]:
     return file_content, ext
 
 # ---------------------------------------------------------------------------
+# Risk item normalization
+# ---------------------------------------------------------------------------
+# risk_items 在库里可能以两种键名存在：
+#   1) 本接口写入的 schema 格式：risk_level / category / clause / description / suggestion
+#   2) ContractReviewAgent 写入的 agent 格式：risk_level / risk_category /
+#      clause_text / risk_description / suggestion
+# 读取时若直接 RiskItem(**item)，agent 格式会缺 category/clause/description 三个必填
+# 字段并抛 ValidationError（表现为 GET /contract/reviews 500）。这里统一归一化。
+def _coerce_risk_item(item: Any) -> RiskItem:
+    if not isinstance(item, dict):
+        item = {}
+    return RiskItem(
+        risk_level=str(item.get("risk_level") or "low"),
+        category=str(item.get("category") or item.get("risk_category") or "unknown"),
+        clause=str(item.get("clause") or item.get("clause_text") or ""),
+        description=str(item.get("description") or item.get("risk_description") or ""),
+        suggestion=str(
+            item.get("suggestion") or "请根据相关法律法规审查该条款的具体内容。"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Lazy-loaded agent instance
 # ---------------------------------------------------------------------------
 _contract_review_agent: ContractReviewAgent | None = None
@@ -438,7 +461,7 @@ async def list_reviews(
             status="completed",
             overall_score=int(r.risk_score) if r.risk_score is not None else None,
             summary=r.summary,
-            risks=[RiskItem(**item) for item in risks_data],
+            risks=[_coerce_risk_item(item) for item in risks_data],
             created_at=r.created_at,
         ))
 
@@ -487,7 +510,7 @@ async def get_review(
         status="completed",
         overall_score=int(review.risk_score) if review.risk_score is not None else None,
         summary=review.summary,
-        risks=[RiskItem(**item) for item in risks_data],
+        risks=[_coerce_risk_item(item) for item in risks_data],
         created_at=review.created_at,
     )
 

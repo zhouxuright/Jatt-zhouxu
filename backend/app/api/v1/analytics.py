@@ -17,7 +17,7 @@ from app.models.conversation import Conversation
 from app.models.feedback import Feedback
 from app.models.message import Message, MessageRole
 from app.models.user import User
-from app.models.document import Document
+from app.models.document import ContractReview, Document
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -82,53 +82,108 @@ class TrendResponse(BaseModel):
 async def get_dashboard_stats(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    scope: str = Query(
+        default="me",
+        description="Statistics scope: 'me' (current user only) or 'global' (whole system, admin only)",
+    ),
 ) -> DashboardStats:
-    """Get system dashboard statistics.
+    """Get dashboard statistics.
+
+    ``scope=me`` (default) returns the current user's own usage; ``scope=global``
+    returns system-wide figures and is restricted to administrators.
 
     Sequential lightweight COUNT queries. PostgreSQL handles these efficiently
     with proper indexes. Single-query consolidation with scalar subqueries
     was tested and found no faster (PG planner doesn't parallelise subqueries).
     """
+    if scope not in ("me", "global"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scope must be 'me' or 'global'",
+        )
+    if scope == "global" and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required for global statistics",
+        )
+
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     thirty_days_ago = now - timedelta(days=30)
+    personal = scope == "me"
+    uid = current_user.id
 
     async def _count(stmt) -> int:
         return (await db.execute(stmt)).scalar() or 0
 
     # Sequential queries — each is a fast index scan on small tables
-    total_users = await _count(select(func.count(User.id)))
-    total_conversations = await _count(select(func.count(Conversation.id)))
-    total_messages = await _count(select(func.count(Message.id)))
-    total_documents = await _count(select(func.count(Document.id)))
-    total_reviews = await _count(
-        select(func.count(Document.id)).where(Document.status == "ready")
-    )
+    if personal:
+        total_users = 1
+        total_conversations = await _count(
+            select(func.count(Conversation.id)).where(Conversation.user_id == uid)
+        )
+        total_messages = await _count(
+            select(func.count(Message.id))
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Conversation.user_id == uid)
+        )
+        total_documents = await _count(
+            select(func.count(Document.id)).where(Document.user_id == uid)
+        )
+        total_reviews = await _count(
+            select(func.count(ContractReview.id)).where(ContractReview.user_id == uid)
+        )
+        feedback_stats = (await db.execute(
+            select(func.avg(Feedback.rating).label("avg"), func.count(Feedback.id).label("cnt"))
+            .where(Feedback.user_id == uid)
+        )).one_or_none()
 
-    # Feedback stats in one query
-    feedback_stats = (await db.execute(
-        select(func.avg(Feedback.rating).label("avg"), func.count(Feedback.id).label("cnt"))
-    )).one_or_none()
+        active_users = await _count(
+            select(func.count(func.distinct(Conversation.user_id)))
+            .where(Conversation.user_id == uid, Conversation.created_at >= thirty_days_ago)
+        )
+        daily_active_users = await _count(
+            select(func.count(func.distinct(Conversation.user_id)))
+            .where(Conversation.user_id == uid, Conversation.created_at >= today_start)
+        )
+        daily_conversations = await _count(
+            select(func.count(Conversation.id))
+            .where(Conversation.user_id == uid, Conversation.created_at >= today_start)
+        )
+        daily_messages = await _count(
+            select(func.count(Message.id))
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Conversation.user_id == uid, Message.created_at >= today_start)
+        )
+    else:
+        total_users = await _count(select(func.count(User.id)))
+        total_conversations = await _count(select(func.count(Conversation.id)))
+        total_messages = await _count(select(func.count(Message.id)))
+        total_documents = await _count(select(func.count(Document.id)))
+        total_reviews = await _count(select(func.count(ContractReview.id)))
+        feedback_stats = (await db.execute(
+            select(func.avg(Feedback.rating).label("avg"), func.count(Feedback.id).label("cnt"))
+        )).one_or_none()
+
+        active_users = await _count(
+            select(func.count(func.distinct(Conversation.user_id)))
+            .where(Conversation.created_at >= thirty_days_ago)
+        )
+        daily_active_users = await _count(
+            select(func.count(func.distinct(Conversation.user_id)))
+            .where(Conversation.created_at >= today_start)
+        )
+        daily_conversations = await _count(
+            select(func.count(Conversation.id))
+            .where(Conversation.created_at >= today_start)
+        )
+        daily_messages = await _count(
+            select(func.count(Message.id))
+            .where(Message.created_at >= today_start)
+        )
+
     avg_feedback = float(feedback_stats[0]) if feedback_stats and feedback_stats[0] else 0.0
     feedback_count = feedback_stats[1] if feedback_stats else 0
-
-    # Time-filtered queries
-    active_users = await _count(
-        select(func.count(func.distinct(Conversation.user_id)))
-        .where(Conversation.created_at >= thirty_days_ago)
-    )
-    daily_active_users = await _count(
-        select(func.count(func.distinct(Conversation.user_id)))
-        .where(Conversation.created_at >= today_start)
-    )
-    daily_conversations = await _count(
-        select(func.count(Conversation.id))
-        .where(Conversation.created_at >= today_start)
-    )
-    daily_messages = await _count(
-        select(func.count(Message.id))
-        .where(Message.created_at >= today_start)
-    )
 
     return DashboardStats(
         total_users=total_users,

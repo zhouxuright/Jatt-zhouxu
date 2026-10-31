@@ -36,8 +36,6 @@ export default defineConfig({
           'element-plus': ['element-plus', '@element-plus/icons-vue'],
           // Vue core — rarely changes
           'vue-vendor': ['vue', 'vue-router', 'pinia'],
-          // Chart library (if present)
-          'chart-vendor': ['echarts', 'vue-echarts'],
         },
       },
     },
