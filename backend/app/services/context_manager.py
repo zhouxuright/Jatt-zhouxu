@@ -497,6 +497,7 @@ class ContextManager:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=800,
+                task="fast",  # 摘要属低价值高频任务，可路由到更便宜的模型
             )
             new_summary = result.get("content", "").strip()
 
@@ -846,6 +847,7 @@ class ContextManager:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=30,
+                task="fast",  # 意图分类：只要标签，用便宜模型足够
             )
             label = result.get("content", "").strip()
             return label[:20] if label else "一般法律咨询"
@@ -1031,6 +1033,7 @@ class ContextManager:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=500,
+                task="fast",  # 短摘要同理，走快模型
             )
             summary = result.get("content", "").strip()
 

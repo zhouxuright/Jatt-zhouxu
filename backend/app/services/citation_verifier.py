@@ -18,6 +18,32 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# 来源分级（P0-2 证据等级标签）
+# ---------------------------------------------------------------------------
+
+# 证据等级 -> 面向用户的标签。四档对应：权威法条 / 裁判文书 / 二手解读 / 无来源。
+# ``statute`` 与 ``judgment`` 属于可直接援引或可核查的一手来源，
+# ``secondary`` 仅作参考，``none`` 表示无法追溯来源。
+EVIDENCE_LEVELS: dict[str, str] = {
+    "statute": "法条原文",
+    "judgment": "裁判文书",
+    "secondary": "二手解读",
+    "none": "无来源",
+}
+
+
+def evidence_rank(level: str) -> int:
+    """证据等级的可信度排序（越大越可信），用于聚合时取最优来源。"""
+    return {"statute": 3, "judgment": 2, "secondary": 1}.get(level, 0)
+
+
+def describe_evidence(level: str) -> tuple[str, str]:
+    """返回 (evidence_level, evidence_label)，未知等级按无来源处理。"""
+    normalized = level if level in EVIDENCE_LEVELS else "none"
+    return normalized, EVIDENCE_LEVELS[normalized]
+
+
+# ---------------------------------------------------------------------------
 # Chinese numeral <-> integer conversion
 # ---------------------------------------------------------------------------
 
@@ -144,6 +170,8 @@ async def verify_citations(db: AsyncSession, text: str) -> dict[str, Any]:
         law_name = cit["law_name"]
         cit["status"] = "unverified"
         cit["confidence"] = 0.0
+        # 默认按"无来源"，仅在条文命中原表后升级为 statute。
+        cit["evidence_level"], cit["evidence_label"] = describe_evidence("none")
 
         if law_name not in law_cache:
             law_cache[law_name] = await _resolve_law(db, law_name)
@@ -170,6 +198,7 @@ async def verify_citations(db: AsyncSession, text: str) -> dict[str, Any]:
         if await _article_exists(db, law_id, num_int):
             cit["status"] = "verified"
             cit["confidence"] = 1.0 if exact else 0.75
+            cit["evidence_level"], cit["evidence_label"] = describe_evidence("statute")
             verified.append(cit)
             confidence_scores.append(cit["confidence"])
         else:
@@ -178,6 +207,13 @@ async def verify_citations(db: AsyncSession, text: str) -> dict[str, Any]:
             confidence_scores.append(0.0)
 
     overall = round(sum(confidence_scores) / len(confidence_scores), 4) if confidence_scores else 0.0
+
+    # 整体证据等级取所有引用中的最优来源；无引用时为 none。
+    best_level = "none"
+    for cit in verified + unverified:
+        if evidence_rank(cit.get("evidence_level", "none")) > evidence_rank(best_level):
+            best_level = cit.get("evidence_level", "none")
+    overall_level, overall_label = describe_evidence(best_level)
 
     return {
         "citations": verified + unverified,
@@ -188,6 +224,9 @@ async def verify_citations(db: AsyncSession, text: str) -> dict[str, Any]:
         # 有引用且全部通过校验，才认为可以直接给确定性结论。
         "allow_definitive": bool(citations) and len(unverified) == 0,
         "confidence": overall,
+        # P0-2 来源分级：整体证据等级 + 面向用户的标签
+        "evidence_level": overall_level,
+        "evidence_label": overall_label,
     }
 
 
@@ -318,6 +357,7 @@ def summarize_verification(result: dict[str, Any] | None) -> str:
         f"verified={result.get('verified_count', 0)} "
         f"unverified={result.get('unverified_count', 0)} "
         f"confidence={result.get('confidence', 0)} "
+        f"evidence={result.get('evidence_label', EVIDENCE_LEVELS['none'])} "
         f"definitive={gate['allow_definitive']}"
     )
 
@@ -350,6 +390,8 @@ async def resolve_citation_detail(
         "law": None,
         "article": None,
         "provenance": "unknown",
+        "evidence_level": "none",
+        "evidence_label": EVIDENCE_LEVELS["none"],
         "message": "",
     }
     if not law_name or num_int is None:
@@ -397,9 +439,11 @@ async def resolve_citation_detail(
             }
             # ``legal_articles`` 为已授权的权威语料，可作为可援引来源。
             detail["provenance"] = "authoritative"
+            detail["evidence_level"], detail["evidence_label"] = describe_evidence("statute")
             detail["message"] = "已命中权威条文，可直接援引"
             break
 
     if not detail["found"]:
         detail["message"] = "该法已收录，但未找到对应条号（可能是条号笔误或版本差异）"
+        detail["evidence_level"], detail["evidence_label"] = describe_evidence("none")
     return detail

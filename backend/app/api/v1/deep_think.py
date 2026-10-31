@@ -5,6 +5,7 @@ Endpoints:
 - POST /deep-think/stream -- Streaming deep reasoning with SSE
 - GET /deep-think/models -- List available reasoning models
 """
+import asyncio
 import json
 import logging
 from typing import Any
@@ -102,7 +103,9 @@ async def deep_think(request: DeepThinkRequest) -> DeepThinkResponse:
         if request.include_rag:
             try:
                 from app.api.v1.chat import retrieve_legal_knowledge, format_rag_context
-                retrieved = retrieve_legal_knowledge(request.query, top_k=5)
+                retrieved = await asyncio.to_thread(
+                    retrieve_legal_knowledge, request.query, 5
+                )
                 rag_context = format_rag_context(retrieved)
             except Exception as exc:
                 logger.warning("RAG retrieval for deep think failed: %s", exc)
@@ -168,7 +171,9 @@ async def deep_think_stream(request: DeepThinkRequest) -> StreamingResponse:
     if request.include_rag:
         try:
             from app.api.v1.chat import retrieve_legal_knowledge, format_rag_context
-            retrieved = retrieve_legal_knowledge(request.query, top_k=5)
+            retrieved = await asyncio.to_thread(
+                retrieve_legal_knowledge, request.query, 5
+            )
             rag_context = format_rag_context(retrieved)
         except Exception as exc:
             logger.warning("RAG retrieval for deep think stream failed: %s", exc)

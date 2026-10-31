@@ -62,6 +62,51 @@ LLM_API_CALLS = Counter(
     registry=registry,
 )
 
+# Token / cost accounting — the basis of the "cost per request" dashboard.
+LLM_INPUT_TOKENS = Counter(
+    "llm_input_tokens_total",
+    "Total prompt (input) tokens sent to LLM providers",
+    ["provider", "model"],
+    registry=registry,
+)
+
+LLM_OUTPUT_TOKENS = Counter(
+    "llm_output_tokens_total",
+    "Total completion (output) tokens returned by LLM providers",
+    ["provider", "model"],
+    registry=registry,
+)
+
+LLM_COST_USD = Counter(
+    "llm_cost_usd_total",
+    "Estimated cumulative LLM cost in USD",
+    ["provider", "model"],
+    registry=registry,
+)
+
+LLM_CACHE_HITS = Counter(
+    "llm_cache_hits_total",
+    "LLM calls served from cache instead of the provider",
+    ["kind"],
+    registry=registry,
+)
+
+LLM_LATENCY = Histogram(
+    "llm_call_latency_seconds",
+    "End-to-end LLM call latency (non-streaming)",
+    ["provider", "model"],
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 20.0, 30.0, 60.0),
+    registry=registry,
+)
+
+LLM_TTFT = Histogram(
+    "llm_stream_ttft_seconds",
+    "Time to first token for streaming LLM calls",
+    ["provider", "model"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 20.0),
+    registry=registry,
+)
+
 # Embedding metrics
 EMBEDDING_GENERATIONS = Counter(
     "embedding_generations_total",
@@ -75,6 +120,14 @@ RAG_RETRIEVALS = Counter(
     "rag_retrievals_total",
     "Total RAG retrieval calls",
     ["source"],
+    registry=registry,
+)
+
+# Grounding metrics — claim-level evidence support checks.
+GROUNDING_CHECKS = Counter(
+    "grounding_checks_total",
+    "Claim-level grounding checks by outcome level",
+    ["status"],
     registry=registry,
 )
 

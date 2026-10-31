@@ -5,6 +5,7 @@ and non-streaming chat modes, token counting, and cost tracking.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -62,6 +63,109 @@ def _format_exc(exc: Exception) -> str:
 def _is_transient(exc: Exception) -> bool:
     """连接层瞬时故障（网络抖动、TLS 重置、超时）值得重试一次。"""
     return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
+
+
+# =============================================================================
+# 成本 / 延迟治理工具
+# =============================================================================
+# 所有 LLM 调用都收敛到 ``LLMService.chat`` / ``chat_stream``，因此 token 预算
+# 裁剪、精确缓存、成本账本与指标上报全部集中在这一层实现，调用方零改动。
+_EXACT_CACHE_PREFIX = "legal:llm:exact:"
+_COST_LEDGER_PREFIX = "legal:llm:cost:"
+# 瞬时错误重试退避。原先固定 sleep 2s 会把 P95 白白拖长一倍；0.5s 足以覆盖
+# TLS/连接抖动，且用户感知不到。
+_RETRY_DELAYS = (0.5,)
+
+
+def _metrics_module():
+    """Lazy import：指标上报失败绝不能影响 LLM 主流程。"""
+    try:
+        from app.middleware import metrics
+        return metrics
+    except Exception:  # pragma: no cover - best effort
+        return None
+
+
+def _hash_messages(
+    messages: list[dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+    model: str,
+    provider: str,
+) -> str:
+    """精确缓存指纹：输入 + 全部采样参数。"""
+    payload = json.dumps(
+        {"m": messages, "t": temperature, "mt": max_tokens, "model": model, "provider": provider},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+async def _cache_get(key: str) -> dict[str, Any] | None:
+    try:
+        from app.core.redis import get_redis
+        raw = await get_redis().get(key)
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        logger.debug("exact cache read skipped: %s", _format_exc(exc))
+        return None
+
+
+async def _cache_set(key: str, value: dict[str, Any], ttl: int) -> None:
+    try:
+        from app.core.redis import get_redis
+        await get_redis().set(key, json.dumps(value, ensure_ascii=False), ex=max(1, int(ttl)))
+    except Exception as exc:
+        logger.debug("exact cache write skipped: %s", _format_exc(exc))
+
+
+async def _ledger_record(model: str, input_tokens: int, output_tokens: int, cost: float) -> None:
+    """按天写 Redis 成本账本（进程重启不清零，供管理端查询）。"""
+    if not settings.LLM_COST_LEDGER_ENABLED:
+        return
+    try:
+        from app.core.redis import get_redis
+        key = f"{_COST_LEDGER_PREFIX}{time.strftime('%Y-%m-%d')}"
+        pipe = get_redis().pipeline()
+        pipe.hincrbyfloat(key, f"cost:{model}", float(cost))
+        pipe.hincrby(key, f"tokens:{model}", int(input_tokens + output_tokens))
+        pipe.hincrby(key, "calls", 1)
+        pipe.expire(key, 60 * 60 * 24 * 400)
+        await pipe.execute()
+    except Exception as exc:
+        logger.debug("cost ledger write skipped: %s", _format_exc(exc))
+
+
+def _record_llm_metrics(
+    provider: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost: float,
+    latency: float | None = None,
+    ttft: float | None = None,
+) -> None:
+    m = _metrics_module()
+    if m is None:
+        return
+    try:
+        m.LLM_API_CALLS.labels(provider=provider, model=model).inc()
+        if input_tokens:
+            m.LLM_INPUT_TOKENS.labels(provider=provider, model=model).inc(input_tokens)
+        if output_tokens:
+            m.LLM_OUTPUT_TOKENS.labels(provider=provider, model=model).inc(output_tokens)
+        if cost:
+            m.LLM_COST_USD.labels(provider=provider, model=model).inc(cost)
+        if latency is not None:
+            m.LLM_LATENCY.labels(provider=provider, model=model).observe(latency)
+        if ttft is not None:
+            m.LLM_TTFT.labels(provider=provider, model=model).observe(ttft)
+    except Exception:  # pragma: no cover
+        pass
 
 # Approximate cost per 1K tokens (USD)
 COST_PER_1K = {
@@ -144,6 +248,9 @@ class LLMService:
         max_tokens: int = 4096,
         model: str | None = None,
         provider: str | None = None,
+        task: str | None = None,
+        timeout: float | None = None,
+        no_cache: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Send a chat completion request with automatic provider fallback.
@@ -154,6 +261,9 @@ class LLMService:
             max_tokens: Maximum tokens in the response.
             model: Override the default model.
             provider: Override the provider order (single provider).
+            task: "fast" 路由到 LLM_FAST_MODEL，"deep" 路由到 LLM_DEEP_MODEL。
+            timeout: 单请求超时（秒），默认取 LLM_LATENCY_BUDGET_SECONDS。
+            no_cache: 跳过精确匹配缓存（需要强实时/唯一结果时使用）。
             **kwargs: Additional API parameters.
 
         Returns:
@@ -162,30 +272,63 @@ class LLMService:
         Raises:
             RuntimeError: If all providers fail.
         """
+        # ① 任务分档：低价值/格式化任务走更便宜的模型，降低单次成本
+        if task and model is None:
+            if task == "fast" and settings.LLM_FAST_MODEL:
+                model = settings.LLM_FAST_MODEL
+            elif task == "deep" and settings.LLM_DEEP_MODEL:
+                model = settings.LLM_DEEP_MODEL
+
+        # ② token 预算：system 提示始终保留，只丢弃较早的历史（成本大头）
+        budgeted = self._apply_budget(self._enrich_messages(messages))
+
+        # ③ 精确缓存：相同输入+参数在 TTL 内直接复用 → 0 token、0 延迟
+        cache_key: str | None = None
+        if settings.LLM_EXACT_CACHE_ENABLED and not no_cache:
+            if self.count_message_tokens(budgeted) <= settings.LLM_EXACT_CACHE_MAX_INPUT_TOKENS:
+                cache_key = _EXACT_CACHE_PREFIX + _hash_messages(
+                    budgeted, temperature, max_tokens, model or "", provider or "",
+                )
+                cached = await _cache_get(cache_key)
+                if cached is not None:
+                    cached["cached"] = True
+                    m = _metrics_module()
+                    if m is not None:
+                        try:
+                            m.LLM_CACHE_HITS.labels(kind="exact").inc()
+                        except Exception:
+                            pass
+                    return cached
+
+        request_timeout = timeout or settings.LLM_LATENCY_BUDGET_SECONDS
         providers = [provider] if provider else self.provider_order
         errors: list[str] = []
 
         for provider_name in providers:
-            for attempt in range(2):
+            for attempt in range(len(_RETRY_DELAYS) + 1):
                 try:
                     result = await self._chat_provider(
                         provider_name=provider_name,
-                        messages=messages,
+                        messages=budgeted,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         model=model,
+                        timeout=request_timeout,
                         **kwargs,
                     )
                     self._request_count += 1
+                    if cache_key:
+                        await _cache_set(cache_key, result, settings.LLM_EXACT_CACHE_TTL_SECONDS)
                     return result
                 except Exception as exc:
                     err_text = _format_exc(exc)
-                    if _is_transient(exc) and attempt == 0:
+                    if _is_transient(exc) and attempt < len(_RETRY_DELAYS):
+                        delay = _RETRY_DELAYS[attempt]
                         logger.warning(
-                            "Provider '%s' failed (attempt %d/2): %s — retrying in 2s",
-                            provider_name, attempt + 1, err_text,
+                            "Provider '%s' failed (attempt %d): %s — retrying in %.1fs",
+                            provider_name, attempt + 1, err_text, delay,
                         )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(delay)
                         continue
                     logger.warning("Provider '%s' failed: %s", provider_name, err_text)
                     errors.append(f"{provider_name}: {err_text}")
@@ -251,6 +394,7 @@ class LLMService:
         max_tokens: int = 4096,
         model: str | None = None,
         provider: str | None = None,
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
         """Stream a chat completion response.
@@ -266,31 +410,37 @@ class LLMService:
         Yields:
             Text chunks from the streaming response.
         """
+        budgeted = self._apply_budget(self._enrich_messages(messages))
         providers = [provider] if provider else self.provider_order
         errors: list[str] = []
 
         for provider_name in providers:
-            for attempt in range(2):
+            for attempt in range(len(_RETRY_DELAYS) + 1):
+                yielded_any = False
                 try:
                     async for chunk in self._chat_stream_provider(
                         provider_name=provider_name,
-                        messages=messages,
+                        messages=budgeted,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         model=model,
+                        timeout=timeout,
                         **kwargs,
                     ):
+                        yielded_any = True
                         yield chunk
                     self._request_count += 1
                     return
                 except Exception as exc:
                     err_text = _format_exc(exc)
-                    if _is_transient(exc) and attempt == 0:
+                    # 已经吐字后再重试会产生重复内容，因此只允许"未出字"重试
+                    if _is_transient(exc) and not yielded_any and attempt < len(_RETRY_DELAYS):
+                        delay = _RETRY_DELAYS[attempt]
                         logger.warning(
-                            "Provider '%s' streaming failed (attempt %d/2): %s — retrying in 2s",
-                            provider_name, attempt + 1, err_text,
+                            "Provider '%s' streaming failed (attempt %d): %s — retrying in %.1fs",
+                            provider_name, attempt + 1, err_text, delay,
                         )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(delay)
                         continue
                     logger.warning("Provider '%s' streaming failed: %s", provider_name, err_text)
                     errors.append(f"{provider_name}: {err_text}")
@@ -307,6 +457,7 @@ class LLMService:
         temperature: float,
         max_tokens: int,
         model: str | None = None,
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Send a non-streaming chat request to a specific provider."""
@@ -342,7 +493,12 @@ class LLMService:
 
         start_time = time.time()
         async with _llm_semaphore:
-            response = await client.post(url, headers=headers, json=payload)
+            response = await client.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout or settings.LLM_LATENCY_BUDGET_SECONDS,
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -363,6 +519,10 @@ class LLMService:
             "LLM call: provider=%s model=%s tokens=%d cost=$%.6f time=%.2fs",
             provider_name, model_name, total_tokens, cost, elapsed,
         )
+        _record_llm_metrics(
+            provider_name, model_name, input_tokens, output_tokens, cost, latency=elapsed,
+        )
+        await _ledger_record(model_name, input_tokens, output_tokens, cost)
 
         return {
             "content": choice["message"]["content"],
@@ -376,6 +536,7 @@ class LLMService:
             "cost": cost,
             "finish_reason": choice.get("finish_reason", "stop"),
             "elapsed_seconds": elapsed,
+            "cached": False,
         }
 
     async def _chat_stream_provider(
@@ -385,6 +546,7 @@ class LLMService:
         temperature: float,
         max_tokens: int,
         model: str | None = None,
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
         """Stream a chat completion from a specific provider."""
@@ -408,7 +570,7 @@ class LLMService:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
+        payload: dict[str, Any] = {
             "model": model_name,
             "messages": enriched_messages,
             "temperature": temperature,
@@ -416,23 +578,65 @@ class LLMService:
             "stream": True,
             **kwargs,
         }
+        # 关键：不请求 usage 的话流式调用永远进不了成本账本（统计缺口）
+        if settings.LLM_STREAM_INCLUDE_USAGE:
+            payload["stream_options"] = {"include_usage": True}
+
+        start_time = time.time()
+        first_token_at: float | None = None
+        usage: dict[str, Any] = {}
 
         async with _llm_semaphore:
-            async with client.stream("POST", url, headers=headers, json=payload) as response:
+            async with client.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout or settings.LLM_LATENCY_BUDGET_SECONDS,
+            ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str.strip() == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            delta = data["choices"][0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                yield content
-                        except json.JSONDecodeError:
-                            continue
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    # 末尾 usage chunk 的 choices 为空数组，必须先取 usage 再判断
+                    if data.get("usage"):
+                        usage = data["usage"]
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    content = (choices[0].get("delta") or {}).get("content", "")
+                    if content:
+                        if first_token_at is None:
+                            first_token_at = time.time()
+                        yield content
+
+        # 流结束：记账 + 上报指标（首 token 延迟单独打点，用于前端体验优化）
+        if usage:
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+            cost = self._calculate_cost(model_name, input_tokens, output_tokens)
+            elapsed = time.time() - start_time
+            self._total_tokens += total_tokens
+            self._total_cost += cost
+            self._call_times.append(elapsed)
+            logger.info(
+                "LLM stream: provider=%s model=%s tokens=%d cost=$%.6f time=%.2fs",
+                provider_name, model_name, total_tokens, cost, elapsed,
+            )
+            _record_llm_metrics(
+                provider_name, model_name, input_tokens, output_tokens, cost,
+                latency=elapsed,
+                ttft=(first_token_at - start_time) if first_token_at else None,
+            )
+            await _ledger_record(model_name, input_tokens, output_tokens, cost)
 
     def _enrich_messages(
         self,
@@ -497,6 +701,44 @@ class LLMService:
             total += self.count_tokens(msg.get("content", ""), model)
         total += 2  # Reply priming
         return total
+
+    def _apply_budget(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        """按 ``LLM_MAX_INPUT_TOKENS`` 裁剪输入，控制单次调用成本。
+
+        规则：system 提示永远保留（它定义了输出格式与合规边界），只丢弃
+        较早的对话历史；若最后一条自身就超预算（例如整篇合同），按字符
+        比例截断，避免整段内容把 prompt 撑爆。
+        """
+        budget = settings.LLM_MAX_INPUT_TOKENS
+        if not budget or budget <= 0 or not messages:
+            return list(messages)
+        if self.count_message_tokens(messages) <= budget:
+            return list(messages)
+
+        has_system = messages[0].get("role") == "system"
+        system = [messages[0]] if has_system else []
+        rest = list(messages[1:] if has_system else messages)
+
+        keep = max(1, settings.LLM_CONTEXT_KEEP_RECENT)
+        tail = rest[-keep:] if len(rest) > keep else rest
+        if not tail:
+            return system
+
+        base_cost = self.count_message_tokens(system) if system else 0
+        while len(tail) > 1 and base_cost + self.count_message_tokens(tail) > budget:
+            tail.pop(0)
+
+        # 单条仍然超预算：按比例截断正文
+        remaining = budget - base_cost - 6  # 每条消息约 4-6 token 结构开销
+        last = dict(tail[-1])
+        content = last.get("content", "") or ""
+        content_tokens = self.count_tokens(content)
+        if remaining > 0 and content_tokens > remaining:
+            keep_chars = int(len(content) * remaining / content_tokens)
+            last["content"] = content[: max(200, keep_chars)]
+            tail[-1] = last
+
+        return system + tail
 
     def get_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
         """Calculate the cost for a given token usage.

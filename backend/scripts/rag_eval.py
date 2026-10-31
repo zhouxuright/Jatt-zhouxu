@@ -131,6 +131,78 @@ def percentile(values: list[float], pct: float) -> float:
     return ordered[index]
 
 
+# ---------------------------------------------------------------------------
+# 基线对比（P0-3 评测 CI 门禁）
+# ---------------------------------------------------------------------------
+
+# 参与门禁的指标：("指标路径", "higher" 越大越好 / "lower" 越小越好)。
+GATED_METRICS: list[tuple[str, str]] = [
+    ("hit_rate.@1", "higher"),
+    ("hit_rate.@3", "higher"),
+    ("hit_rate.@5", "higher"),
+    ("recall.@1", "higher"),
+    ("recall.@3", "higher"),
+    ("recall.@5", "higher"),
+    ("mrr@5", "higher"),
+    ("ndcg@5", "higher"),
+    ("empty_rate", "lower"),
+]
+
+
+def metric_value(report: dict, path: str) -> float | None:
+    """读取指标，兼容两种存储形态：
+
+    - 完整报告：嵌套结构，如 ``{"hit_rate": {"@1": 0.8}}``；
+    - 基线文件：``metrics_only()`` 写出的扁平键，如 ``{"hit_rate.@1": 0.8}``。
+    """
+    node: object = report
+    if isinstance(node, dict) and path in node and isinstance(node[path], (int, float)):
+        return float(node[path])
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    if not isinstance(node, (int, float)):
+        return None
+    return float(node)
+
+
+def metrics_only(report: dict) -> dict[str, float]:
+    """只保留门禁指标，便于把基线文件写小并避免噪声 diff。"""
+    values = {path: metric_value(report, path) for path, _ in GATED_METRICS}
+    return {k: v for k, v in values.items() if v is not None}
+
+
+def compare_with_baseline(
+    report: dict, baseline: dict, tolerance: float = 0.02,
+) -> list[dict]:
+    """把当前指标与基线对比，返回"劣化超过容差"的指标列表。
+
+    容差 ``tolerance`` 为绝对差值：命中率类指标允许小幅波动，
+    但超过阈值即视为回归，CI 应直接失败。
+    """
+    regressions: list[dict] = []
+    for path, direction in GATED_METRICS:
+        current = metric_value(report, path)
+        previous = metric_value(baseline, path)
+        if current is None or previous is None:
+            continue
+        delta = current - previous
+        if direction == "higher":
+            allowed = delta >= -tolerance
+        else:
+            allowed = delta <= tolerance
+        if not allowed:
+            regressions.append({
+                "metric": path,
+                "baseline": round(previous, 4),
+                "current": round(current, 4),
+                "delta": round(delta, 4),
+                "tolerance": tolerance,
+            })
+    return regressions
+
+
 def evaluate(golden_path: Path, top_k: int, use_reranker: bool, limit: int | None) -> dict:
     from app.rag.advanced_retriever import get_rag_pipeline
 
@@ -221,6 +293,12 @@ def main() -> int:
     parser.add_argument("--no-rerank", action="store_true", help="关闭 cross-encoder，做 A/B 对比")
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条，快速自检")
     parser.add_argument("--json", default=None, help="把完整结果写入 JSON 文件")
+    parser.add_argument("--baseline", default=None, help="基线指标 JSON 路径；劣化超容差则退出码 1")
+    parser.add_argument(
+        "--tolerance", type=float, default=0.02,
+        help="允许的绝对劣化幅度（默认 0.02，即 2 个百分点）",
+    )
+    parser.add_argument("--save-baseline", default=None, help="把本次门禁指标写为新的基线文件")
     parser.add_argument("--verbose", action="store_true", help="逐条打印命中的前 5 条")
     args = parser.parse_args()
 
@@ -248,6 +326,30 @@ def main() -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n完整结果已写入 {args.json}")
+
+    if args.save_baseline:
+        Path(args.save_baseline).write_text(
+            json.dumps(metrics_only(report), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"\n基线已更新: {args.save_baseline}")
+
+    if args.baseline:
+        baseline_path = Path(args.baseline)
+        if not baseline_path.exists():
+            print(f"\n[WARN] 基线文件不存在，跳过门禁对比: {baseline_path}")
+        else:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            regressions = compare_with_baseline(report, baseline, args.tolerance)
+            if regressions:
+                print("\n[FAIL] 检索指标相对基线劣化（超过容差 %.2f）：" % args.tolerance)
+                for item in regressions:
+                    print(
+                        f"  - {item['metric']}: {item['baseline']} -> {item['current']} "
+                        f"(delta {item['delta']})"
+                    )
+                return 1
+            print(f"\n[PASS] 检索指标未劣化（容差 {args.tolerance:.2f}）")
 
     return 0
 

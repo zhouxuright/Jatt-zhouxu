@@ -1,5 +1,29 @@
 """FastAPI application entry point for the Legal Intelligent Assistance System."""
 
+import os
+
+# ---------------------------------------------------------------------------
+# Native thread limits — MUST be set before torch / numpy / FlagEmbedding
+# are imported anywhere in the process.
+#
+# The backend runs in a 2-CPU container. Left to its defaults, torch spawns
+# one OpenMP thread per core *per inference call*; when two retrieval calls
+# overlapped, those native thread pools raced inside the same process and the
+# interpreter died with "Segmentation fault (core dumped)" (surfaced as a
+# nginx 502). Pinning every BLAS/OpenMP pool to a single thread removes the
+# oversubscription and is the supported way to run CPU inference in a small
+# container.
+# ---------------------------------------------------------------------------
+for _var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "TOKENIZERS_PARALLELISM",
+):
+    os.environ.setdefault(_var, "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator

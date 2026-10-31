@@ -190,6 +190,10 @@ class Settings(BaseSettings):
     RAG_DEFAULT_TOP_K: int = 5
     # CPU 环境下 cross-encoder 重排是主要延迟来源，可临时关闭做对比实验。
     RAG_RERANK_ENABLED: bool = True
+    # 单进程内同时执行的检索条数上限。检索会触发 BGE-M3 编码 + BM25 + Milvus
+    # 调用，多个原生调用重叠时会直接段错误（Segmentation fault）而不是 OOM。
+    # 默认 1 = 严格串行，全部检索在专用单线程上执行，这是唯一稳定方案。
+    RAG_MAX_CONCURRENT_RETRIEVALS: int = 1
 
     # ------------------------------------------------------------------
     # Semantic cache (LLM 语义缓存)
@@ -197,6 +201,60 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_ENABLED: bool = True
     SEMANTIC_CACHE_SIMILARITY_THRESHOLD: float = 0.92
     SEMANTIC_CACHE_TTL_SECONDS: int = 3600
+
+    # ------------------------------------------------------------------
+    # LLM token cost governance / latency budget
+    # ------------------------------------------------------------------
+    # 输入预算（估算 token）。超预算时按"保留系统提示 + 最近 N 轮"裁剪，
+    # 避免把整段合同/长历史全部喂给模型（这是 token 成本的最大来源）。
+    LLM_MAX_INPUT_TOKENS: int = 6000
+    # 裁剪时始终保留的最近消息条数（不含 system）。
+    LLM_CONTEXT_KEEP_RECENT: int = 8
+    # 单次请求的延迟预算（秒），作为 httpx 单请求超时；外部 provider 抖动
+    # 时快速失败并切下一个 provider，而不是把请求拖到 120s。
+    LLM_LATENCY_BUDGET_SECONDS: float = 90.0
+
+    # 精确匹配缓存：同样的 messages+参数在 TTL 内直接复用，命中即 0 token。
+    # 只对非流式调用生效，且不缓存超长上下文（命中率低、key 成本高）。
+    LLM_EXACT_CACHE_ENABLED: bool = True
+    LLM_EXACT_CACHE_TTL_SECONDS: int = 300
+    LLM_EXACT_CACHE_MAX_INPUT_TOKENS: int = 2000
+
+    # 任务分档：将低价值/格式化任务路由到更便宜的模型。
+    # 置空表示不覆盖，继续使用 provider 默认模型。
+    LLM_FAST_MODEL: str = ""
+    LLM_DEEP_MODEL: str = ""
+
+    # 流式调用请求 usage 统计（DeepSeek/OpenAI 兼容接口支持），
+    # 让流式路径也能进成本账本。
+    LLM_STREAM_INCLUDE_USAGE: bool = True
+
+    # 成本账本：按天写入 Redis（进程重启不清零）。
+    LLM_COST_LEDGER_ENABLED: bool = True
+
+    # ------------------------------------------------------------------
+    # Retrieval-side caches (降低重复编码/重复检索的延迟)
+    # ------------------------------------------------------------------
+    # 单条 query embedding 的进程内 LRU 大小。BGE-M3 单条 CPU 编码是
+    # 1-3s 级开销，同 query 复用时直接命中可省掉这段延迟。
+    RAG_QUERY_EMBEDDING_CACHE_SIZE: int = 256
+    # BM25 查询结果 LRU 大小。
+    RAG_BM25_CACHE_SIZE: int = 128
+
+    # ------------------------------------------------------------------
+    # Claim-level grounding（主张级引用绑定）
+    # ------------------------------------------------------------------
+    # 对含法条引用/检索片段的主张句做证据支撑校验；关闭后只保留
+    # 法条号存在性校验（citation_verifier）。
+    GROUNDING_ENABLED: bool = True
+    # 单次校验的最大主张数（控制数据库查询与 CPU 开销）。
+    GROUNDING_MAX_CLAIMS: int = 10
+    # 主张二元组被证据覆盖比例 >= 该值判定为"有支撑"。
+    GROUNDING_SUPPORT_THRESHOLD: float = 0.30
+    # 介于 weak 与 support 之间判定为"弱支撑"。
+    GROUNDING_WEAK_THRESHOLD: float = 0.12
+    # 低于该长度的句子不视为需要证据的主张。
+    GROUNDING_MIN_CLAIM_CHARS: int = 12
 
     # ------------------------------------------------------------------
     # Performance observability & generic response cache

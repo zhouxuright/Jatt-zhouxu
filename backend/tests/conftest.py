@@ -4,7 +4,6 @@ Provides async SQLite session, FastAPI TestClient, sample user, and auth headers
 All tests run without external services (no PostgreSQL, Redis, or Milvus needed).
 """
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator
 
@@ -28,19 +27,6 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 TEST_JWT_SECRET = "test-jwt-secret-key-for-testing-only"
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-# ---------------------------------------------------------------------------
-# Event loop fixture (required for pytest-asyncio on Windows)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create an event loop for the test session."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 # ---------------------------------------------------------------------------

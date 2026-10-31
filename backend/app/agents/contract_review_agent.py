@@ -431,12 +431,16 @@ class ContractReviewAgent(BaseAgent[ContractReviewState]):
         """Retrieve relevant law articles from RAG for the contract text."""
         try:
             from app.rag.advanced_retriever import get_rag_pipeline
-            pipeline = get_rag_pipeline()
-            # Use first 2000 chars of contract as query to find relevant laws
+            # 合同可能很长，先用前 2000 字作为查询
             query_text = contract_text[:2000] if contract_text else ""
             if not query_text:
                 return []
-            results = pipeline.retrieve(
+            # get_rag_pipeline() 会同步加载 BM25 索引；retrieve() 是 CPU 密集的
+            # 原生推理。两者都不能在事件循环线程里跑，否则整个进程的并发请求
+            # 全部串行卡住（表现为 nginx 502 / 超时）。
+            pipeline = await asyncio.to_thread(get_rag_pipeline)
+            results = await asyncio.to_thread(
+                pipeline.retrieve,
                 query=query_text,
                 top_k=10,
                 use_bm25=True,

@@ -14,8 +14,12 @@ Usage:
 import asyncio
 import logging
 import os
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +28,23 @@ class ModelRegistry:
     """Singleton registry for all AI models.
 
     Models are loaded lazily on first access and cached for the lifetime
-    of the process. Thread-safe via asyncio lock for async contexts.
+    of the process. Thread-safe via a process-wide ``threading.Lock`` with
+    double-checked locking: retrieval runs on worker threads, so an
+    asyncio lock (bound to one event loop) would not protect the loaders
+    and two concurrent first requests could load a 1.2GB model twice inside
+    the same interpreter — which is what crashed it with a segfault.
     """
 
     _embedding_model: Any = None
     _reranker_model: Any = None
-    _lock = asyncio.Lock()
+    _lock = threading.Lock()
     _initialized = False
+
+    # 单条 query 的 embedding LRU 缓存。检索链里同一个 query 会被编码多次
+    # （BM25 管线 / Milvus / 语义缓存），BGE-M3 单条 CPU 编码 1-3s，
+    # 命中缓存可直接省掉这部分延迟与算力。
+    _embed_cache: "OrderedDict[str, list[float]]" = OrderedDict()
+    _embed_cache_lock = threading.Lock()
 
     # Local model paths — use HuggingFace model names as primary,
     # with optional local override via environment variables.
@@ -52,12 +66,14 @@ class ModelRegistry:
         Uses local cache path first, falls back to HuggingFace model name.
         """
         if cls._embedding_model is None:
-            from FlagEmbedding import BGEM3FlagModel
-            import os
-            model_path = cls._BGE_M3_LOCAL if os.path.isdir(cls._BGE_M3_LOCAL) else "BAAI/bge-m3"
-            logger.info("Loading BGE-M3 embedding model from: %s", model_path)
-            cls._embedding_model = BGEM3FlagModel(model_path, use_fp16=True)
-            logger.info("BGE-M3 embedding model loaded successfully")
+            with cls._lock:
+                if cls._embedding_model is None:
+                    cls._pin_torch_threads()
+                    from FlagEmbedding import BGEM3FlagModel
+                    model_path = cls._BGE_M3_LOCAL if os.path.isdir(cls._BGE_M3_LOCAL) else "BAAI/bge-m3"
+                    logger.info("Loading BGE-M3 embedding model from: %s", model_path)
+                    cls._embedding_model = BGEM3FlagModel(model_path, use_fp16=True)
+                    logger.info("BGE-M3 embedding model loaded successfully")
         return cls._embedding_model
 
     @classmethod
@@ -68,13 +84,31 @@ class ModelRegistry:
         Uses local cache path first, falls back to HuggingFace model name.
         """
         if cls._reranker_model is None:
-            from FlagEmbedding import FlagReranker
-            import os
-            model_path = cls._BGE_RERANKER_LOCAL if os.path.isdir(cls._BGE_RERANKER_LOCAL) else "BAAI/bge-reranker-v2-m3"
-            logger.info("Loading BGE-Reranker-V2-M3 model from: %s", model_path)
-            cls._reranker_model = FlagReranker(model_path, use_fp16=True)
-            logger.info("BGE-Reranker-V2-M3 model loaded successfully")
+            with cls._lock:
+                if cls._reranker_model is None:
+                    cls._pin_torch_threads()
+                    from FlagEmbedding import FlagReranker
+                    model_path = cls._BGE_RERANKER_LOCAL if os.path.isdir(cls._BGE_RERANKER_LOCAL) else "BAAI/bge-reranker-v2-m3"
+                    logger.info("Loading BGE-Reranker-V2-M3 model from: %s", model_path)
+                    cls._reranker_model = FlagReranker(model_path, use_fp16=True)
+                    logger.info("BGE-Reranker-V2-M3 model loaded successfully")
         return cls._reranker_model
+
+    @staticmethod
+    def _pin_torch_threads() -> None:
+        """Force torch to a single compute thread.
+
+        In a 2-CPU container the default intra-op pool spawned one thread per
+        core per inference; overlapping inferences raced in native code and
+        segfaulted the interpreter. One thread per process is stable and, for
+        single-query inference, not measurably slower.
+        """
+        try:
+            import torch
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.debug("Could not pin torch threads: %s", exc)
 
     @classmethod
     async def warmup(cls) -> None:
@@ -99,11 +133,43 @@ class ModelRegistry:
         logger.info("All AI models warmed up and ready")
 
     @classmethod
+    def _cache_get(cls, text: str) -> list[float] | None:
+        with cls._embed_cache_lock:
+            vec = cls._embed_cache.get(text)
+            if vec is not None:
+                cls._embed_cache.move_to_end(text)
+            return vec
+
+    @classmethod
+    def _cache_put(cls, text: str, vec: list[float]) -> None:
+        with cls._embed_cache_lock:
+            cls._embed_cache[text] = vec
+            cls._embed_cache.move_to_end(text)
+            while len(cls._embed_cache) > settings.RAG_QUERY_EMBEDDING_CACHE_SIZE:
+                cls._embed_cache.popitem(last=False)
+
+    @classmethod
+    def embed_one_sync(cls, text: str) -> list[float]:
+        """Synchronous single-text embedding with an LRU cache.
+
+        Used by the retrieval pipeline (which runs on its own executor
+        thread) so repeated queries never pay the BGE-M3 encoding cost twice.
+        """
+        cached = cls._cache_get(text)
+        if cached is not None:
+            return cached
+        model = cls.get_embedding_model()
+        output = model.encode([text], return_dense=True)
+        vec = output["dense_vecs"][0].tolist()
+        cls._cache_put(text, vec)
+        return vec
+
+    @classmethod
     async def embed_texts(cls, texts: list[str]) -> list[list[float]]:
         """Generate embeddings using the singleton model (async-safe).
 
         Runs the CPU-bound encoding in a thread pool to avoid blocking
-        the async event loop.
+        the async event loop. Single-text calls are LRU-cached.
 
         Args:
             texts: List of texts to embed.
@@ -111,13 +177,21 @@ class ModelRegistry:
         Returns:
             List of embedding vectors.
         """
+        if len(texts) == 1:
+            cached = cls._cache_get(texts[0])
+            if cached is not None:
+                return [cached]
+
         model = cls.get_embedding_model()
         loop = asyncio.get_running_loop()
         output = await loop.run_in_executor(
             None,
             lambda: model.encode(texts, return_dense=True),
         )
-        return [e.tolist() for e in output["dense_vecs"]]
+        vectors = [e.tolist() for e in output["dense_vecs"]]
+        if len(texts) == 1:
+            cls._cache_put(texts[0], vectors[0])
+        return vectors
 
     @classmethod
     async def embed_query(cls, query: str) -> list[float]:

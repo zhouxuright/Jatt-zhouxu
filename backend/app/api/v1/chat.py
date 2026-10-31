@@ -57,6 +57,11 @@ from app.services.citation_verifier import (
     summarize_verification,
     verify_citations,
 )
+from app.services.grounding import (
+    build_grounding_note,
+    ground_claims,
+    summarize_grounding,
+)
 
 import uuid
 import tempfile
@@ -1274,6 +1279,7 @@ async def chat_stream(
         content: str,
         was_filtered: bool = False,
         citation_result: dict | None = None,
+        grounding_result: dict | None = None,
     ) -> None:
         """Write the assistant message using a session of its own.
 
@@ -1316,6 +1322,7 @@ async def chat_stream(
                     "citations": saved_citations,
                     "content_filtered": was_filtered,
                     "citation_verification": citation_result,
+                    "grounding": grounding_result,
                     "disclaimer": DISCLAIMER_PREFIX,
                     "ai_generated": True,
                     "generation_metadata": watermark_meta,
@@ -1347,7 +1354,11 @@ async def chat_stream(
                 resource_type="conversation",
                 resource_id=conversation_id_str,
                 status_code=200,
-                request_summary=summarize_verification(citation_result),
+                request_summary=(
+                    summarize_verification(citation_result)
+                    + " | "
+                    + summarize_grounding(grounding_result)
+                ),
             ))
 
             # P1-5：把本会话沉淀的事实档案合并进用户长期记忆（跨会话延续）
@@ -1365,6 +1376,7 @@ async def chat_stream(
         full_content = ""
         content_filtered = False
         citation_check = None
+        grounding_check = None
         saved = False
         try:
             # Build combined citations: RAG + web search
@@ -1434,6 +1446,8 @@ async def chat_stream(
                 full_content = filtered_content
 
             # Citation existence verification (法条号存在性校验回路, P0-3)
+            # 记录追加提示前的正文，供主张级 grounding 使用，避免提示文本自污染。
+            pre_note_content = full_content
             try:
                 citation_check = await verify_citations(db, full_content)
                 unverified = citation_check.get("unverified", [])
@@ -1454,6 +1468,20 @@ async def chat_stream(
             except Exception as exc:
                 logger.warning("Citation verification skipped: %s", exc)
 
+            # Claim-level grounding（主张级引用绑定, P0-1）：逐句判断是否有证据支撑。
+            try:
+                grounding_check = await ground_claims(db, pre_note_content, retrieved)
+            except Exception as exc:
+                logger.warning("Claim-level grounding skipped: %s", exc)
+            grounding_note = build_grounding_note(grounding_check)
+            if grounding_note:
+                full_content += grounding_note
+                logger.warning(
+                    "Claim-level grounding flagged unsupported claims (level=%s, score=%s)",
+                    grounding_check.get("level") if grounding_check else None,
+                    grounding_check.get("grounding_score") if grounding_check else None,
+                )
+
             # Apply AI content identification watermarks (人工智能生成合成内容标识办法)
             watermarked_content = watermark_service.add_explicit_watermark(full_content, content_type="chat")
             watermarked_content = watermark_service.add_implicit_watermark(watermarked_content, watermark_meta)
@@ -1471,6 +1499,7 @@ async def chat_stream(
                 watermarked_content,
                 was_filtered=content_filtered,
                 citation_result=citation_check,
+                grounding_result=grounding_check,
             )
             saved = True
 
@@ -1622,6 +1651,8 @@ async def chat(
         assistant_content = filtered_content
 
     # Citation existence verification (法条号存在性校验回路, P0-3)
+    # 记录追加提示前的正文，供主张级 grounding 使用，避免提示文本自污染。
+    pre_note_content = assistant_content
     citation_check = None
     citation_gate: dict[str, Any] | None = None
     try:
@@ -1643,6 +1674,21 @@ async def chat(
     except Exception as exc:
         logger.warning("Citation verification skipped: %s", exc)
 
+    # Claim-level grounding（主张级引用绑定, P0-1）
+    grounding_check: dict[str, Any] | None = None
+    try:
+        grounding_check = await ground_claims(db, pre_note_content, retrieved)
+    except Exception as exc:
+        logger.warning("Claim-level grounding skipped: %s", exc)
+    grounding_note = build_grounding_note(grounding_check)
+    if grounding_note:
+        assistant_content += grounding_note
+        logger.warning(
+            "Claim-level grounding flagged unsupported claims (level=%s, score=%s)",
+            grounding_check.get("level") if grounding_check else None,
+            grounding_check.get("grounding_score") if grounding_check else None,
+        )
+
     # P0-4：引用校验结果写入审计日志（合规凭证）
     try:
         db.add(AuditLog(
@@ -1652,7 +1698,11 @@ async def chat(
             resource_type="conversation",
             resource_id=str(conversation.id),
             status_code=200,
-            request_summary=summarize_verification(citation_check),
+            request_summary=(
+                summarize_verification(citation_check)
+                + " | "
+                + summarize_grounding(grounding_check)
+            ),
         ))
         await db.flush()
     except Exception as exc:  # noqa: BLE001 - 留痕失败不应影响回答
@@ -1673,6 +1723,7 @@ async def chat(
         "content_filtered": content_filtered,
         "citation_verification": citation_check,
         "citation_gate": citation_gate,
+        "grounding": grounding_check,
         "disclaimer": DISCLAIMER_PREFIX,
         "ai_generated": True,
         "generation_metadata": watermark_meta,

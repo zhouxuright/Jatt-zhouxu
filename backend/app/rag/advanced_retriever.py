@@ -15,7 +15,9 @@ import logging
 import math
 import re
 import threading
-from collections import Counter
+from array import array
+from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.core.config import settings
@@ -43,6 +45,13 @@ class BM25Retriever:
         self.avgdl: float = 0.0
         self.idf: dict[str, float] = {}
         self.n_docs: int = 0
+        # 倒排索引：term -> array('i')，每个元素打包为 (doc_idx << 16) | tf。
+        # 之前的实现每次查询都要遍历全部 1 万篇文档并重建 Counter，单次耗时
+        # 是秒级；倒排索引让查询只扫"命中词"的 posting list。
+        self._postings: dict[str, array] = {}
+        # 查询结果 LRU：重复提问直接返回，不再重算。
+        self._search_cache: "OrderedDict[tuple[str, int], list[dict[str, Any]]]" = OrderedDict()
+        self._cache_size: int = settings.RAG_BM25_CACHE_SIZE
 
     def _tokenize(self, text: str) -> list[str]:
         """Tokenize Chinese text using character bigrams + legal keywords.
@@ -115,6 +124,25 @@ class BM25Retriever:
         for term, freq in df.items():
             self.idf[term] = math.log((self.n_docs - freq + 0.5) / (freq + 0.5) + 1.0)
 
+        # Build the inverted index (term → packed [(doc_idx << 16) | tf]).
+        # Only terms whose df is small enough to matter are kept: terms present
+        # in >50% of documents carry ~0 IDF, and their posting lists are the
+        # ones that would dominate query time.
+        max_df = max(1, int(self.n_docs * 0.5))
+        postings: dict[str, array] = {}
+        for idx, tokens in enumerate(self.doc_tokens):
+            for term, freq in Counter(tokens).items():
+                freq = min(freq, 0xFFFF)
+                postings.setdefault(term, array("i")).append((idx << 16) | freq)
+        self._postings = {
+            term: plist for term, plist in postings.items() if len(plist) <= max_df
+        }
+        self._search_cache.clear()
+        logger.info(
+            "BM25 inverted index built: %d terms (%d docs)",
+            len(self._postings), self.n_docs,
+        )
+
     def search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         """Search documents using BM25 scoring.
 
@@ -128,38 +156,51 @@ class BM25Retriever:
         if not self.documents:
             return []
 
+        cache_key = (query, top_k)
+        cached = self._search_cache.get(cache_key)
+        if cached is not None:
+            self._search_cache.move_to_end(cache_key)
+            return [dict(d) for d in cached]
+
         query_tokens = self._tokenize(query)
         if not query_tokens:
             return []
 
-        scores: list[float] = []
-        for i, doc_tokens in enumerate(self.doc_tokens):
-            score = 0.0
-            doc_len = self.doc_len[i]
-            token_freq: dict[str, int] = Counter(doc_tokens)
+        # Score only documents that actually contain a query term.
+        avgdl = max(self.avgdl, 1)
+        k1, b = self.k1, self.b
+        scores: dict[int, float] = {}
 
-            for qt in query_tokens:
-                if qt not in token_freq:
-                    continue
-                tf = token_freq[qt]
-                idf = self.idf.get(qt, 0.0)
-                numerator = tf * (self.k1 + 1)
-                denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / max(self.avgdl, 1))
-                score += idf * numerator / denominator
+        for qt in set(query_tokens):
+            posting = self._postings.get(qt)
+            if not posting:
+                continue
+            idf = self.idf.get(qt, 0.0)
+            if idf <= 0.0:
+                continue
+            for packed in posting:
+                idx = packed >> 16
+                tf = packed & 0xFFFF
+                dl = self.doc_len[idx]
+                denominator = tf + k1 * (1 - b + b * dl / avgdl)
+                scores[idx] = scores.get(idx, 0.0) + idf * tf * (k1 + 1) / denominator
 
-            scores.append(score)
-
-        # Sort by score descending
-        indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+        if not scores:
+            return []
 
         results = []
-        for idx, score in indexed_scores[:top_k]:
-            if score <= 0:
-                break
+        for idx, score in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]:
             doc = dict(self.documents[idx])
             doc["bm25_score"] = float(score)
             doc["source"] = "bm25"
             results.append(doc)
+
+        # Bounded LRU cache of the result set (defensive copies on read).
+        if self._cache_size > 0:
+            self._search_cache[cache_key] = [dict(d) for d in results]
+            self._search_cache.move_to_end(cache_key)
+            while len(self._search_cache) > self._cache_size:
+                self._search_cache.popitem(last=False)
 
         return results
 
@@ -359,26 +400,18 @@ class AdvancedRAGPipeline:
         Synthetic / generated data is excluded so that BM25 candidates
         are drawn only from real legal content.
 
-        Note: This method uses asyncio.run() which will fail if called from
-        within an already-running event loop. In that case, it returns [] and
-        the caller falls back to seed data. The RAG pipeline should be
-        re-initialized via reload() after mass import.
+        Note: this method uses ``asyncio.run()``, which requires a thread
+        without a running event loop. Several agent nodes call
+        ``get_rag_pipeline()`` from ``async def`` functions, so when a loop is
+        already running the load is executed on a throwaway worker thread.
+        Returning ``[]`` instead would silently initialise the pipeline with
+        the 31-article seed corpus and BM25 would never see the real articles.
         """
         from sqlalchemy import select, func
 
         try:
             from app.core.config import settings
             from app.models.legal_knowledge import Law, LegalArticle
-
-            # Check if we're inside an already-running event loop
-            try:
-                asyncio.get_running_loop()
-                # We ARE in an async context — asyncio.run() would fail.
-                # Return empty and let caller fall back to seed data.
-                logger.debug("Cannot load from DB inside async context, will use seed data")
-                return []
-            except RuntimeError:
-                pass  # No running loop — safe to use asyncio.run()
 
             # IMPORTANT: use a dedicated throwaway engine with NullPool instead
             # of the app-global async_session_factory. asyncio.run() spins up a
@@ -458,7 +491,15 @@ class AdvancedRAGPipeline:
                 finally:
                     await engine.dispose()
 
-            return asyncio.run(_load_docs())
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(_load_docs())
+
+            # Event loop is running on this thread: ``asyncio.run()`` would raise.
+            # Hop to a throwaway worker thread so the load still happens.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, _load_docs()).result()
 
         except Exception as exc:
             logger.warning("Failed to load documents from DB for BM25: %s", exc)
@@ -481,12 +522,17 @@ class AdvancedRAGPipeline:
     ) -> list[dict[str, Any]]:
         """Execute the full hybrid retrieval + reranking pipeline.
 
-        Steps:
-        1. BM25 keyword search → top-2K candidates
-        2. Milvus vector search → top-2K candidates
-        3. Knowledge graph traversal → cross-referenced & same-chapter articles
-        4. RRF fusion → merge & deduplicate (1.2x boost for graph-connected results)
-        5. Cross-Encoder reranking → final top-K
+        Serialized execution: every stage below enters native code (BGE-M3
+        torch inference, pymilvus gRPC, BM25 math). Running several of them
+        concurrently inside the interpreter crashed the process outright
+        (``Segmentation fault (core dumped)``) on a 2-core container, which
+        nginx surfaced as a 502. A semaphore was not enough — *overlapping*
+        native calls still raced.
+
+        All pipeline executions are therefore handed to a dedicated
+        ``ThreadPoolExecutor`` whose size is ``RAG_MAX_CONCURRENT_RETRIEVALS``
+        (default 1 = strict serialization). Callers block off the event loop,
+        so the API stays responsive while native work runs one at a time.
 
         Args:
             query: Search query text.
@@ -498,6 +544,43 @@ class AdvancedRAGPipeline:
 
         Returns:
             List of ranked documents with scores from all stages.
+        """
+        # Re-entrancy guard: if a pipeline stage ever calls back into
+        # retrieve() from the retrieval thread itself, run inline instead of
+        # submitting to the (possibly single-worker) executor and deadlocking.
+        if getattr(_RETRIEVAL_TLS, "active", False):
+            return self._retrieve_impl(
+                query, top_k, use_bm25, use_vector, use_graph, use_reranker
+            )
+
+        def _run() -> list[dict[str, Any]]:
+            _RETRIEVAL_TLS.active = True
+            try:
+                return self._retrieve_impl(
+                    query, top_k, use_bm25, use_vector, use_graph, use_reranker
+                )
+            finally:
+                _RETRIEVAL_TLS.active = False
+
+        return _get_retrieval_executor().submit(_run).result()
+
+    def _retrieve_impl(
+        self,
+        query: str,
+        top_k: int = 5,
+        use_bm25: bool = True,
+        use_vector: bool = True,
+        use_graph: bool = True,
+        use_reranker: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Full retrieval pipeline body (see :meth:`retrieve`).
+
+        Steps:
+        1. BM25 keyword search → top-2K candidates
+        2. Milvus vector search → top-2K candidates
+        3. Knowledge graph traversal → cross-referenced & same-chapter articles
+        4. RRF fusion → merge & deduplicate (1.2x boost for graph-connected results)
+        5. Cross-Encoder reranking → final top-K
         """
         if not self._initialized:
             self.initialize()
@@ -682,6 +765,30 @@ class AdvancedRAGPipeline:
 
 _rag_pipeline: AdvancedRAGPipeline | None = None
 _rag_pipeline_lock = threading.Lock()
+_retrieval_executor: ThreadPoolExecutor | None = None
+_retrieval_executor_lock = threading.Lock()
+# Per-thread flag so retrieve() can detect it is already running on a
+# retrieval worker and avoid submitting to itself (deadlock on 1 worker).
+_RETRIEVAL_TLS = threading.local()
+
+
+def _get_retrieval_executor() -> ThreadPoolExecutor:
+    """Return the process-wide dedicated retrieval executor.
+
+    Sized from ``settings.RAG_MAX_CONCURRENT_RETRIEVALS`` on first use.
+    With the default of 1 every pipeline execution is strictly serialized on
+    a single named thread, which is the only reliable way to keep pymilvus /
+    torch native calls from racing and segfaulting the interpreter.
+    """
+    global _retrieval_executor
+    if _retrieval_executor is None:
+        with _retrieval_executor_lock:
+            if _retrieval_executor is None:
+                _retrieval_executor = ThreadPoolExecutor(
+                    max_workers=max(1, settings.RAG_MAX_CONCURRENT_RETRIEVALS),
+                    thread_name_prefix="rag-retrieval",
+                )
+    return _retrieval_executor
 
 
 def get_rag_pipeline() -> AdvancedRAGPipeline:

@@ -10,6 +10,7 @@ Combines:
 - Cross-reference validation
 """
 from typing import Any, Optional
+import asyncio
 import logging
 import re
 import json
@@ -185,13 +186,14 @@ class DeepResearchAgent(BaseAgent[DeepResearchState]):
 
         try:
             from app.rag.advanced_retriever import get_rag_pipeline
-            pipeline = get_rag_pipeline()
+            pipeline = await asyncio.to_thread(get_rag_pipeline)
 
             # Use keywords from research plan if available
             keywords = research_plan.get("keywords", [question])
             search_query = " ".join(keywords[:5]) if keywords else question
 
-            results = pipeline.retrieve(
+            results = await asyncio.to_thread(
+                pipeline.retrieve,
                 query=search_query,
                 top_k=15,
                 use_bm25=True,
@@ -288,13 +290,14 @@ class DeepResearchAgent(BaseAgent[DeepResearchState]):
 
         try:
             from app.rag.advanced_retriever import get_rag_pipeline
-            pipeline = get_rag_pipeline()
+            pipeline = await asyncio.to_thread(get_rag_pipeline)
 
             # Search specifically for judicial interpretations
             keywords = research_plan.get("keywords", [question])
             search_query = "司法解释 " + " ".join(keywords[:3])
 
-            results = pipeline.retrieve(
+            results = await asyncio.to_thread(
+                pipeline.retrieve,
                 query=search_query,
                 top_k=10,
                 use_bm25=True,

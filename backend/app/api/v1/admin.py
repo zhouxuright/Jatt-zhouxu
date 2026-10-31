@@ -479,6 +479,62 @@ class AssignTenantRequest(BaseModel):
     tenant_id: str = Field(..., min_length=1, max_length=36)
 
 
+@router.get("/llm-usage")
+async def llm_usage(
+    _admin: Annotated[User, Depends(get_current_admin_user)],
+    days: int = Query(7, ge=1, le=90),
+) -> dict:
+    """LLM token / 成本账本（按天 + 按模型），是"降本增效"的度量入口。
+
+    数据来自 ``LLMService`` 写入 Redis 的日账本（``legal:llm:cost:<date>``），
+    进程重启不清零；另附当前进程的累计统计做交叉校验。
+    """
+    from app.core.redis import get_redis
+    from app.services.llm_service import get_raw_llm_service
+
+    redis = get_redis()
+    today = datetime.now().date()
+    daily: list[dict] = []
+    total_cost = 0.0
+    total_tokens = 0
+    total_calls = 0
+
+    for offset in range(days):
+        day = (today - timedelta(days=offset)).isoformat()
+        raw = await redis.hgetall(f"legal:llm:cost:{day}")
+        cost_by_model = {
+            k[len("cost:"):]: round(float(v), 6)
+            for k, v in raw.items() if k.startswith("cost:")
+        }
+        tokens_by_model = {
+            k[len("tokens:"):]: int(v)
+            for k, v in raw.items() if k.startswith("tokens:")
+        }
+        day_cost = round(sum(cost_by_model.values()), 6)
+        day_tokens = sum(tokens_by_model.values())
+        day_calls = int(raw.get("calls", 0))
+        total_cost += day_cost
+        total_tokens += day_tokens
+        total_calls += day_calls
+        daily.append({
+            "date": day,
+            "calls": day_calls,
+            "tokens": day_tokens,
+            "cost_usd": day_cost,
+            "cost_by_model": cost_by_model,
+            "tokens_by_model": tokens_by_model,
+        })
+
+    return {
+        "window_days": days,
+        "total_calls": total_calls,
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_cost, 6),
+        "daily": daily,
+        "process_stats": get_raw_llm_service().get_usage_stats(),
+    }
+
+
 @router.get("/tenants", response_model=TenantListResponse)
 async def list_tenants(
     db: Annotated[AsyncSession, Depends(get_db)],

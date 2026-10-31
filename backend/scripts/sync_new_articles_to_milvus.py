@@ -1,20 +1,31 @@
 # -*- coding: utf-8 -*-
-"""Incrementally sync new PG legal_articles into the Milvus collection.
+"""Sync PostgreSQL ``legal_articles`` rows into the Milvus collection.
 
-Unlike app/rag/milvus_full_import.py (full re-import with positional ids),
-this script targets rows created since a given date and uses deterministic
-`pg_{article_pk}` ids, making re-runs idempotent: rows already present in
-Milvus are skipped, only missing ones are embedded and inserted.
+Unlike ``app/rag/milvus_full_import.py`` (full re-import with positional ids),
+this script uses deterministic ``pg_{article_pk}`` ids, making re-runs
+idempotent: rows already present in Milvus are skipped, only missing ones are
+embedded and inserted.
+
+Field limits come from :mod:`app.rag.milvus_schema` (the single source of
+truth) and are then clamped to whatever the *live* collection actually
+declares, so a stale collection cannot silently truncate the business key
+(law name / article number) or blow up an entire batch with a size error.
 
 Usage (inside the backend container):
-    python /app/scripts/sync_new_articles_to_milvus.py --since 2026-09-11
-    python /app/scripts/sync_new_articles_to_milvus.py --since 2026-09-11 --dry-run
+
+    # 首轮全量
+    python /app/scripts/sync_new_articles_to_milvus.py --all
+    # 增量（按 legal_articles.created_at）
+    python /app/scripts/sync_new_articles_to_milvus.py --since 2026-10-01
+    # 冒烟 / 只看差集
+    python /app/scripts/sync_new_articles_to_milvus.py --all --limit 500 --dry-run
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import logging
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -24,52 +35,106 @@ sys.path.insert(0, "/app")
 if not Path("/app").exists():  # host checkout fallback
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select
+from sqlalchemy import select  # noqa: E402
 
-from app.core.config import settings
-from app.core.database import async_session_factory
-from app.models.legal_knowledge import Law, LegalArticle
+from app.core.config import settings  # noqa: E402
+from app.core.database import async_session_factory  # noqa: E402
+from app.models.legal_knowledge import Law, LegalArticle  # noqa: E402
+from app.rag.milvus_schema import (  # noqa: E402
+    LEGAL_ARTICLES_COLLECTION,
+    LEGAL_ARTICLE_ARTICLE_NUMBER_MAX,
+    LEGAL_ARTICLE_CATEGORY_MAX,
+    LEGAL_ARTICLE_CONTENT_MAX,
+    LEGAL_ARTICLE_ID_MAX,
+    LEGAL_ARTICLE_LAW_NAME_MAX,
+    LEGAL_ARTICLE_TAGS_MAX,
+    truncate_utf8,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("milvus_sync")
 
-MILVUS_COLLECTION = "legal_articles"
+MILVUS_COLLECTION = LEGAL_ARTICLES_COLLECTION
+#: 每多少次 PG 行触发一轮「差集 + 向量化 + 写入」。数值越小内存峰值越低。
 MILVUS_BATCH = 500
-EMBED_BATCH = 64
-CONTENT_MAX = 8000
+#: encode 的 batch_size。BGE-M3 会按批内最长句 padding，批越小 padding 浪费越少。
+EMBED_BATCH = int(os.environ.get("SYNC_EMBED_BATCH", "8"))
+#: 离线任务允许截断到 512 token：绝大多数法条远短于此，尾部超长条款被截掉也
+#: 只影响该条的向量表示，不影响 PG 中的权威原文。
+EMBED_MAX_LENGTH = int(os.environ.get("SYNC_EMBED_MAX_LENGTH", "512"))
+#: 离线批量任务用多线程压满 CPU（在线服务才必须 1 线程以免原生层竞态）。
+EMBED_THREADS = int(os.environ.get("SYNC_EMBED_THREADS", "2"))
+FLUSH_EVERY_BATCHES = 20
 
-# Milvus VARCHAR max_length counts UTF-8 BYTES, not characters.
-# Chinese text at 3 bytes/char overflows quickly (e.g. law_name[:256] chars
-# can be 768 bytes > 256-byte schema limit → insert error).
-B_LAW_NAME = 256
-B_ARTICLE_NUM = 64
-B_CONTENT = 8000
-B_TAGS = 512
-B_CATEGORY = 64
-
-
-def _utf8_truncate(s: str | None, max_bytes: int) -> str:
-    if not s:
-        return ""
-    b = s.encode("utf-8")
-    if len(b) <= max_bytes:
-        return s
-    return b[:max_bytes].decode("utf-8", errors="ignore")
+#: 业务键字段：截断会让 Milvus 与 PG 的同一条法条不再相等，差集永远补不齐，
+#: 因此这些字段一旦小于 schema 常量就直接失败，而不是静默截断。
+KEY_LIMITS: dict[str, int] = {
+    "id": LEGAL_ARTICLE_ID_MAX,
+    "law_name": LEGAL_ARTICLE_LAW_NAME_MAX,
+    "article_number": LEGAL_ARTICLE_ARTICLE_NUMBER_MAX,
+}
 
 
 def _clean(text: str) -> str:
-    return _utf8_truncate(re.sub(r"\s+", "", text or "").strip(), B_CONTENT)
+    """Normalise whitespace while keeping paragraph structure.
+
+    旧实现用 ``re.sub(r"\\s+", "", text)`` 删除了**所有**空白，把整条法条压成
+    一行，既损失可读性，也让引文校验无法按行比对。这里只折叠行内多余空白、
+    丢弃空行。
+    """
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t\u3000\u00a0]+", " ", ln).strip() for ln in t.split("\n")]
+    return "\n".join(ln for ln in lines if ln)
 
 
 def _connect():
     from pymilvus import Collection, connections
 
-    connections.connect(
-        alias="sync", host=settings.MILVUS_HOST, port=settings.MILVUS_PORT,
-    )
+    connections.connect(alias="sync", host=settings.MILVUS_HOST, port=settings.MILVUS_PORT)
     coll = Collection(MILVUS_COLLECTION, using="sync")
     coll.load()
     return coll
+
+
+def _live_limits(coll) -> dict[str, int]:
+    """Read the VARCHAR ``max_length`` values the live collection declares."""
+    limits: dict[str, int] = {}
+    for field in coll.schema.fields:
+        params = getattr(field, "params", None) or {}
+        if "max_length" in params:
+            limits[field.name] = int(params["max_length"])
+    return limits
+
+
+def _effective_limits(coll) -> dict[str, int]:
+    live = _live_limits(coll)
+    declared = {
+        "id": LEGAL_ARTICLE_ID_MAX,
+        "law_name": LEGAL_ARTICLE_LAW_NAME_MAX,
+        "article_number": LEGAL_ARTICLE_ARTICLE_NUMBER_MAX,
+        "content": LEGAL_ARTICLE_CONTENT_MAX,
+        "tags": LEGAL_ARTICLE_TAGS_MAX,
+        "category": LEGAL_ARTICLE_CATEGORY_MAX,
+    }
+    eff = {name: min(declared[name], live.get(name, declared[name])) for name in declared}
+
+    for name, limit in KEY_LIMITS.items():
+        if eff[name] < limit:
+            raise RuntimeError(
+                f"Milvus collection '{MILVUS_COLLECTION}' declares {name} "
+                f"max_length={eff[name]} bytes, below required {limit}. "
+                "Truncating a key field would break cross-store matching — "
+                "run scripts/widen_milvus_varchar.py (or recreate the empty "
+                "collection) before syncing."
+            )
+    if eff["content"] < declared["content"]:
+        logger.warning(
+            "collection content max_length=%d < canonical %d; long articles will be truncated",
+            eff["content"],
+            declared["content"],
+        )
+    logger.info("effective varchar limits (bytes): %s", eff)
+    return eff
 
 
 def _existing_ids(coll, ids: list[str]) -> set[str]:
@@ -85,57 +150,17 @@ def _existing_ids(coll, ids: list[str]) -> set[str]:
 def _embed(model, texts: list[str]) -> list[list[float]]:
     embeddings: list[list[float]] = []
     for j in range(0, len(texts), EMBED_BATCH):
-        out = model.encode(texts[j:j + EMBED_BATCH], return_dense=True)
+        out = model.encode(
+            texts[j:j + EMBED_BATCH],
+            return_dense=True,
+            max_length=EMBED_MAX_LENGTH,
+            batch_size=EMBED_BATCH,
+        )
         embeddings.extend(e.tolist() for e in out["dense_vecs"])
     return embeddings
 
 
-async def run(since: datetime, dry_run: bool) -> None:
-    from app.services.model_registry import ModelRegistry
-
-    coll = _connect()
-    logger.info("Milvus connected, entities=%d", coll.num_entities)
-
-    model = ModelRegistry.get_embedding_model()
-
-    inserted = skipped = 0
-    buffer: list = []
-
-    async with async_session_factory() as db:
-        result = await db.stream(
-            select(
-                LegalArticle.id, LegalArticle.article_number, LegalArticle.content,
-                LegalArticle.tags, Law.name, Law.law_type,
-            )
-            .join(Law, Law.id == LegalArticle.law_id)
-            .where(LegalArticle.created_at >= since)
-            .order_by(LegalArticle.created_at)
-        )
-        async for pk, art_num, content, tags, law_name, law_type in result:
-            buffer.append((str(pk), art_num or "", content or "", tags or "",
-                           law_name or "未知法律", law_type or "其他"))
-            if len(buffer) >= MILVUS_BATCH:
-                inserted_n, skipped_n = await asyncio.to_thread(
-                    _flush_batch, coll, model, buffer, dry_run,
-                )
-                inserted += inserted_n
-                skipped += skipped_n
-                buffer = []
-                logger.info("progress: inserted=%d skipped=%d", inserted, skipped)
-
-    if buffer:
-        inserted_n, skipped_n = await asyncio.to_thread(
-            _flush_batch, coll, model, buffer, dry_run,
-        )
-        inserted += inserted_n
-        skipped += skipped_n
-
-    if not dry_run:
-        coll.flush()
-    logger.info("done: inserted=%d skipped=%d (dry_run=%s)", inserted, skipped, dry_run)
-
-
-def _flush_batch(coll, model, rows: list[tuple], dry_run: bool) -> tuple[int, int]:
+def _flush_batch(coll, model, limits, rows: list[tuple], dry_run: bool) -> tuple[int, int]:
     ids = [f"pg_{r[0]}" for r in rows]
     existing = _existing_ids(coll, ids)
     pending = [(rid, r) for rid, r in zip(ids, rows) if rid not in existing]
@@ -153,27 +178,119 @@ def _flush_batch(coll, model, rows: list[tuple], dry_run: bool) -> tuple[int, in
 
     embeddings = _embed(model, [t for _, _, t in keep])
     data = [
-        [rid for rid, _, _ in keep],
-        [_utf8_truncate(r[4], B_LAW_NAME) for _, r, _ in keep],
-        [_utf8_truncate(r[1], B_ARTICLE_NUM) for _, r, _ in keep],
-        [t for _, _, t in keep],
-        [_utf8_truncate(r[3], B_TAGS) for _, r, _ in keep],
-        [_utf8_truncate(r[5], B_CATEGORY) for _, r, _ in keep],
+        [truncate_utf8(rid, limits["id"]) for rid, _, _ in keep],
+        [truncate_utf8(r[4], limits["law_name"]) for _, r, _ in keep],
+        [truncate_utf8(r[1], limits["article_number"]) for _, r, _ in keep],
+        [truncate_utf8(t, limits["content"]) for _, _, t in keep],
+        [truncate_utf8(r[3], limits["tags"]) for _, r, _ in keep],
+        [truncate_utf8(r[5], limits["category"]) for _, r, _ in keep],
         embeddings,
     ]
     coll.insert(data)
     return len(keep), len(rows) - len(keep)
 
 
+def _configure_torch_threads() -> None:
+    """让离线批量任务跑满 CPU 核。
+
+    ``ModelRegistry._pin_torch_threads()`` 会把进程压到单线程——那是在线服务
+    避免原生层并发崩溃的必要条件。这里是独立进程、且 backend 已停，不存在
+    并发推理，因此解除限制以换取吞吐（约 N 倍加速）。
+    """
+    try:
+        import torch
+        torch.set_num_threads(EMBED_THREADS)
+        try:
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+        logger.info("torch intra-op threads set to %d (cpus=%s)", EMBED_THREADS, os.cpu_count())
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.warning("could not widen torch threads: %s", exc)
+
+
+async def run(since: datetime | None, dry_run: bool, limit: int) -> None:
+    from app.services.model_registry import ModelRegistry
+
+    coll = _connect()
+    limits = _effective_limits(coll)
+    logger.info("Milvus connected, entities=%d", coll.num_entities)
+
+    model = ModelRegistry.get_embedding_model()
+    _configure_torch_threads()
+
+    inserted = skipped = 0
+    batches = 0
+    buffer: list = []
+
+    stmt = (
+        select(
+            LegalArticle.id, LegalArticle.article_number, LegalArticle.content,
+            LegalArticle.tags, Law.name, Law.law_type,
+        )
+        .join(Law, Law.id == LegalArticle.law_id)
+        .order_by(LegalArticle.created_at)
+    )
+    if since is not None:
+        stmt = stmt.where(LegalArticle.created_at >= since)
+    if limit:
+        stmt = stmt.limit(limit)
+
+    async with async_session_factory() as db:
+        result = await db.stream(stmt)
+        async for pk, art_num, content, tags, law_name, law_type in result:
+            buffer.append((
+                str(pk), art_num or "", content or "", tags or "",
+                law_name or "未知法律", law_type or "其他",
+            ))
+            if len(buffer) >= MILVUS_BATCH:
+                inserted_n, skipped_n = await asyncio.to_thread(
+                    _flush_batch, coll, model, limits, buffer, dry_run,
+                )
+                inserted += inserted_n
+                skipped += skipped_n
+                buffer = []
+                batches += 1
+                logger.info(
+                    "progress: batch=%d inserted=%d skipped=%d", batches, inserted, skipped,
+                )
+                if not dry_run and batches % FLUSH_EVERY_BATCHES == 0:
+                    coll.flush()
+                    logger.info("flushed to disk at batch %d", batches)
+
+    if buffer:
+        inserted_n, skipped_n = await asyncio.to_thread(
+            _flush_batch, coll, model, limits, buffer, dry_run,
+        )
+        inserted += inserted_n
+        skipped += skipped_n
+        batches += 1
+
+    if not dry_run:
+        coll.flush()
+    logger.info(
+        "done: inserted=%d skipped=%d batches=%d (dry_run=%s)",
+        inserted, skipped, batches, dry_run,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--since", required=True,
+    parser.add_argument("--since", default=None,
                         help="UTC date or datetime, e.g. 2026-09-11 or 2026-09-11T11:00")
+    parser.add_argument("--all", action="store_true", help="sync every row (ignore created_at)")
+    parser.add_argument("--limit", type=int, default=0, help="only read first N rows")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
-    asyncio.run(run(since, args.dry_run))
+    if not args.all and not args.since:
+        parser.error("either --all or --since is required")
+
+    since = (
+        datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
+        if args.since else None
+    )
+    asyncio.run(run(since, args.dry_run, args.limit))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ Legal Consultation Agent - Provides legal advice and analysis using LangGraph.
 Flow: classify_intent -> retrieve_knowledge -> generate_response -> format_output
 """
 from typing import Any, Optional, TypedDict
+import asyncio
 import logging
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
@@ -211,8 +212,9 @@ class LegalConsultAgent(BaseAgent[LegalConsultState]):
         from app.rag.advanced_retriever import get_rag_pipeline
 
         try:
-            pipeline = get_rag_pipeline()
-            results = pipeline.retrieve(
+            pipeline = await asyncio.to_thread(get_rag_pipeline)
+            results = await asyncio.to_thread(
+                pipeline.retrieve,
                 query=query,
                 top_k=8,
                 use_bm25=True,

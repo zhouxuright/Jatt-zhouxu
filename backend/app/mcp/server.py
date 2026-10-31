@@ -171,16 +171,18 @@ class SearchLawsTool(MCPTool):
             return ToolResult(success=False, error="必须提供 query 参数")
 
         try:
-            from app.rag.advanced_retriever import AdvancedRAGPipeline
+            from app.rag.advanced_retriever import get_rag_pipeline
 
-            pipeline = AdvancedRAGPipeline()
+            # 复用进程级单例：每次 new 一个 AdvancedRAGPipeline 都会重建
+            # 上万条法条的 BM25 索引，既慢又吃内存。
             try:
-                pipeline.initialize()
+                pipeline = await asyncio.to_thread(get_rag_pipeline)
             except Exception as init_exc:
                 logger.warning("AdvancedRAGPipeline init failed: %s -- falling back to DB", init_exc)
                 return await self._fallback_db_search(query, top_k, start)
 
-            results = pipeline.retrieve(
+            results = await asyncio.to_thread(
+                pipeline.retrieve,
                 query=query,
                 top_k=top_k,
                 use_bm25=True,

@@ -85,8 +85,15 @@ SEED_LEGAL_ARTICLES: list[dict[str, Any]] = [
 
 
 def _get_embeddings_sync(texts: list[str]) -> list[list[float]]:
-    """Generate embeddings using BAAI/BGE-M3 via the singleton ModelRegistry."""
+    """Generate embeddings using BAAI/BGE-M3 via the singleton ModelRegistry.
+
+    Single-text calls go through the registry's LRU cache: every chat
+    request embeds the same query here and (again) for the semantic cache,
+    so the cache removes one full CPU encode per request.
+    """
     from app.services.model_registry import ModelRegistry
+    if len(texts) == 1:
+        return [ModelRegistry.embed_one_sync(texts[0])]
     model = ModelRegistry.get_embedding_model()
     output = model.encode(texts, return_dense=True)
     return [e.tolist() for e in output["dense_vecs"]]
