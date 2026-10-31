@@ -282,6 +282,18 @@ DOMAIN_BOOST = 1.15
 DOMAIN_REJECT = 0.4
 
 
+def _retrieve_sync(**kwargs: Any) -> list[dict[str, Any]]:
+    """Run the (blocking) RAG pipeline in a worker thread.
+
+    ``asyncio.to_thread`` is given a module-level callable so import-time
+    work stays off the event loop and the pipeline singleton is still
+    created lazily on first use.
+    """
+    from app.rag.advanced_retriever import get_rag_pipeline
+
+    return get_rag_pipeline().retrieve(**kwargs)
+
+
 # =============================================================================
 # Result Model
 # =============================================================================
@@ -435,14 +447,18 @@ class LawRetrievalAgent(BaseAgent[LawRetrievalState]):
             return {"semantic_results": []}
 
         try:
-            from app.rag.advanced_retriever import get_rag_pipeline
-            pipeline = get_rag_pipeline()
             # Cross-encoder reranking (BGE-Reranker-V2-M3) runs on CPU in this
             # deployment and takes 70-150s for ~24 candidates, blowing past the
             # nginx 120s timeout (504). Use the Milvus BGE-M3 cosine scores
             # directly — they are already high-quality semantic signals — and
             # leave final merge/boost to the rerank_results node.
-            results = pipeline.retrieve(
+            #
+            # Milvus/BM25 clients are synchronous; running them inline blocked
+            # the event loop for the whole request, so a single slow search
+            # stalled every other concurrent request (P95 ~9.8s on endpoints
+            # that only read a static dict). Offload to a worker thread.
+            results = await asyncio.to_thread(
+                _retrieve_sync,
                 query=query,
                 top_k=8,
                 use_bm25=False,
@@ -483,9 +499,8 @@ class LawRetrievalAgent(BaseAgent[LawRetrievalState]):
             return {"keyword_results": []}
 
         try:
-            from app.rag.advanced_retriever import get_rag_pipeline
-            pipeline = get_rag_pipeline()
-            results = pipeline.retrieve(
+            results = await asyncio.to_thread(
+                _retrieve_sync,
                 query=query,
                 top_k=8,
                 use_bm25=True,

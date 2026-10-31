@@ -223,7 +223,19 @@ class RequestLoggingMiddleware:
             }
 
             log_func = logging.getLogger("app.request")
-            if status_code >= 500:
+            try:
+                from app.core.config import settings as _settings
+                slow_threshold_ms = _settings.SLOW_REQUEST_THRESHOLD_MS
+            except Exception:
+                slow_threshold_ms = 800
+
+            if status_code < 400 and duration_ms >= slow_threshold_ms:
+                # 慢请求单独标记，便于按 SLOW_REQUEST 聚合定位 P95 长尾
+                log_func.warning(
+                    "SLOW_REQUEST %(method)s %(path)s -> %(status_code)s (%(duration_ms)sms) user=%(user_id)s",
+                    extra,
+                )
+            elif status_code >= 500:
                 log_func.error(
                     "%(method)s %(path)s -> %(status_code)s (%(duration_ms)sms) user=%(user_id)s",
                     extra,

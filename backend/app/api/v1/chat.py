@@ -409,7 +409,7 @@ def _extract_keywords(query: str) -> list[str]:
     return unique[:15]
 
 
-def retrieve_legal_knowledge(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+def retrieve_legal_knowledge(query: str, top_k: int | None = None) -> list[dict[str, Any]]:
     """Advanced RAG retrieval: BM25 keyword + Milvus vector + Cross-Encoder reranking.
 
     Pipeline:
@@ -420,6 +420,11 @@ def retrieve_legal_knowledge(query: str, top_k: int = 5) -> list[dict[str, Any]]
 
     Fallback to in-memory keyword search if Milvus is unavailable.
     """
+    from app.core.config import settings
+
+    if top_k is None:
+        top_k = settings.RAG_DEFAULT_TOP_K
+
     try:
         from app.rag.advanced_retriever import get_rag_pipeline
         pipeline = get_rag_pipeline()
@@ -1006,7 +1011,7 @@ async def chat_stream(
 
     # 5. RAG retrieval (CPU-bound, in executor to avoid blocking event loop)
     rag_task = loop.run_in_executor(
-        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
+        None, lambda: retrieve_legal_knowledge(sanitized_message)
     )
 
     # 6. Semantic cache check (embedding comparison, ~200ms)
@@ -1143,7 +1148,7 @@ async def chat_stream(
     # (retrieve_legal_knowledge is synchronous and CPU-bound: BM25 + Milvus + reranker)
     loop = asyncio.get_running_loop()
     retrieved = await loop.run_in_executor(
-        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
+        None, lambda: retrieve_legal_knowledge(sanitized_message)
     )
     rag_context = format_rag_context(retrieved)
 
@@ -1581,7 +1586,7 @@ async def chat(
     # Run RAG retrieval in executor to avoid blocking the event loop
     loop = asyncio.get_running_loop()
     retrieved = await loop.run_in_executor(
-        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
+        None, lambda: retrieve_legal_knowledge(sanitized_message)
     )
     rag_context = format_rag_context(retrieved)
     system_prompt = build_system_prompt_for_intent(intent, rag_context)
@@ -2097,7 +2102,7 @@ async def chat_voice(
     # Run RAG retrieval in executor to avoid blocking the event loop
     loop = asyncio.get_running_loop()
     retrieved = await loop.run_in_executor(
-        None, lambda: retrieve_legal_knowledge(sanitized_message, top_k=5)
+        None, lambda: retrieve_legal_knowledge(sanitized_message)
     )
     rag_context = format_rag_context(retrieved)
     system_prompt = build_system_prompt_for_intent(intent, rag_context)

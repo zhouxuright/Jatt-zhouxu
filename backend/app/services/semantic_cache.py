@@ -39,11 +39,20 @@ class SemanticCache:
 
     def __init__(
         self,
-        similarity_threshold: float = 0.92,
-        default_ttl: int = 3600,
+        similarity_threshold: float | None = None,
+        default_ttl: int | None = None,
     ) -> None:
-        self.similarity_threshold = similarity_threshold
-        self.default_ttl = default_ttl
+        # 阈值/TTL 改为读配置，便于按环境调整而不改代码。
+        self.similarity_threshold = (
+            settings.SEMANTIC_CACHE_SIMILARITY_THRESHOLD
+            if similarity_threshold is None
+            else similarity_threshold
+        )
+        self.default_ttl = (
+            settings.SEMANTIC_CACHE_TTL_SECONDS
+            if default_ttl is None
+            else default_ttl
+        )
         self._redis: Any = None
         self._stats: dict[str, int] = {"hits": 0, "misses": 0, "sets": 0}
 
@@ -73,6 +82,8 @@ class SemanticCache:
         Returns:
             Cached response dict or None.
         """
+        if not settings.SEMANTIC_CACHE_ENABLED:
+            return None
         redis_client = self._get_redis()
         if redis_client is None:
             return None

@@ -14,8 +14,11 @@ import asyncio
 import logging
 import math
 import re
+import threading
 from collections import Counter
 from typing import Any
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +310,11 @@ class AdvancedRAGPipeline:
         self._initialized = False
         self._documents: list[dict[str, Any]] = []
         self._graph_builder = None
+        # Retrieval now runs in a threadpool (asyncio.to_thread) so that Milvus /
+        # BM25 work does not block the event loop. Initialization therefore needs
+        # a lock: two concurrent first requests would otherwise rebuild the BM25
+        # index in parallel and corrupt shared state.
+        self._init_lock = threading.Lock()
 
     def initialize(self) -> bool:
         """Initialize the RAG pipeline: load documents into BM25 index.
@@ -319,24 +327,27 @@ class AdvancedRAGPipeline:
         if self._initialized:
             return True
 
-        try:
-            # Try to load from PostgreSQL for full BM25 coverage
-            documents = self._load_documents_from_db()
+        with self._init_lock:
+            if self._initialized:
+                return True
+            try:
+                # Try to load from PostgreSQL for full BM25 coverage
+                documents = self._load_documents_from_db()
 
-            if not documents:
-                # Fallback to seed data
-                from app.rag.milvus_service import SEED_LEGAL_ARTICLES
-                documents = SEED_LEGAL_ARTICLES
-                logger.info("Using seed data for BM25 (no DB data available)")
+                if not documents:
+                    # Fallback to seed data
+                    from app.rag.milvus_service import SEED_LEGAL_ARTICLES
+                    documents = SEED_LEGAL_ARTICLES
+                    logger.info("Using seed data for BM25 (no DB data available)")
 
-            self._documents = documents
-            self._bm25.add_documents(self._documents)
-            self._initialized = True
-            logger.info("Advanced RAG pipeline initialized: %d documents indexed", len(self._documents))
-            return True
-        except Exception as exc:
-            logger.error("Failed to initialize RAG pipeline: %s", exc)
-            return False
+                self._documents = documents
+                self._bm25.add_documents(self._documents)
+                self._initialized = True
+                logger.info("Advanced RAG pipeline initialized: %d documents indexed", len(self._documents))
+                return True
+            except Exception as exc:
+                logger.error("Failed to initialize RAG pipeline: %s", exc)
+                return False
 
     def _load_documents_from_db(self, limit: int = 10000) -> list[dict[str, Any]]:
         """Load documents from PostgreSQL for BM25 indexing.
@@ -492,10 +503,12 @@ class AdvancedRAGPipeline:
             self.initialize()
 
         candidate_lists: list[list[dict[str, Any]]] = []
+        candidate_k = top_k * max(1, settings.RAG_CANDIDATE_MULTIPLIER)
+        use_reranker = use_reranker and settings.RAG_RERANK_ENABLED
 
         # Stage 1: BM25 keyword retrieval
         if use_bm25:
-            bm25_results = self._bm25.search(query, top_k=top_k * 3)
+            bm25_results = self._bm25.search(query, top_k=candidate_k)
             if bm25_results:
                 logger.info("BM25: found %d results (top score: %.3f)",
                            len(bm25_results), bm25_results[0].get("bm25_score", 0))
@@ -509,7 +522,7 @@ class AdvancedRAGPipeline:
                 # create_collection() is handled internally by search() —
                 # no need to call it here (saves a has_collection() network round-trip)
                 vector_results = service.search(
-                    query, top_k=top_k * 3,
+                    query, top_k=candidate_k,
                     exclude_sources=["generated", "synthetic"],
                 )
                 if vector_results:
@@ -532,7 +545,7 @@ class AdvancedRAGPipeline:
 
         # Stage 4: Reciprocal Rank Fusion
         if len(candidate_lists) > 1:
-            fused = reciprocal_rank_fusion(candidate_lists, k=60)
+            fused = reciprocal_rank_fusion(candidate_lists, k=settings.RAG_RRF_K)
             logger.info("RRF fusion: %d candidates → %d unique",
                        sum(len(l) for l in candidate_lists), len(fused))
         else:
@@ -547,7 +560,7 @@ class AdvancedRAGPipeline:
             for doc in fused:
                 doc_key = f"{doc.get('law_name', '')}_{doc.get('article_number', '')}"
                 if doc_key in graph_ids:
-                    doc["rrf_score"] = doc.get("rrf_score", 0) * 1.2
+                    doc["rrf_score"] = doc.get("rrf_score", 0) * settings.RAG_GRAPH_BOOST
                     doc["graph_boosted"] = True
 
         # Stage 5: Cross-Encoder reranking
@@ -668,12 +681,20 @@ class AdvancedRAGPipeline:
 # ============================================================================
 
 _rag_pipeline: AdvancedRAGPipeline | None = None
+_rag_pipeline_lock = threading.Lock()
 
 
 def get_rag_pipeline() -> AdvancedRAGPipeline:
-    """Return a singleton AdvancedRAGPipeline instance."""
+    """Return a singleton AdvancedRAGPipeline instance.
+
+    Thread-safe: retrieval runs in a worker thread (``asyncio.to_thread``),
+    so concurrent first requests could otherwise construct/initialize the
+    pipeline more than once and clobber shared BM25/Milvus state.
+    """
     global _rag_pipeline
     if _rag_pipeline is None:
-        _rag_pipeline = AdvancedRAGPipeline()
-        _rag_pipeline.initialize()
+        with _rag_pipeline_lock:
+            if _rag_pipeline is None:
+                _rag_pipeline = AdvancedRAGPipeline()
+                _rag_pipeline.initialize()
     return _rag_pipeline

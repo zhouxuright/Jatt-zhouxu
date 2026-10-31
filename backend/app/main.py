@@ -19,6 +19,7 @@ from app.middleware.metrics import (
 )
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.middleware.audit_log import AuditLogMiddleware
+from app.middleware.response_cache import ResponseCacheMiddleware
 from app.middleware.security import SecurityHeadersMiddleware, InputSanitizationMiddleware
 
 # ---------------------------------------------------------------------------
@@ -156,6 +157,10 @@ app.add_middleware(RequestLoggingMiddleware)
 
 # Prometheus metrics middleware (HTTP counters, histograms, gauges)
 app.add_middleware(PrometheusMiddleware)
+
+# Generic GET response cache — registered last so it runs closest to the route
+# and sits *inside* audit/metrics (those still observe every request).
+app.add_middleware(ResponseCacheMiddleware)
 
 
 # ---------------------------------------------------------------------------

@@ -179,6 +179,49 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 60
 
     # ------------------------------------------------------------------
+    # RAG retrieval tuning
+    # ------------------------------------------------------------------
+    # 原先这些参数硬编码在 advanced_retriever.py 里（top_k*3 / RRF k=60 /
+    # 图谱加权 1.2），导致"调优"只能改代码。外置后可配合 scripts/rag_eval.py
+    # 做 A/B 回归，改配置即生效。
+    RAG_CANDIDATE_MULTIPLIER: int = 3
+    RAG_RRF_K: int = 60
+    RAG_GRAPH_BOOST: float = 1.2
+    RAG_DEFAULT_TOP_K: int = 5
+    # CPU 环境下 cross-encoder 重排是主要延迟来源，可临时关闭做对比实验。
+    RAG_RERANK_ENABLED: bool = True
+
+    # ------------------------------------------------------------------
+    # Semantic cache (LLM 语义缓存)
+    # ------------------------------------------------------------------
+    SEMANTIC_CACHE_ENABLED: bool = True
+    SEMANTIC_CACHE_SIMILARITY_THRESHOLD: float = 0.92
+    SEMANTIC_CACHE_TTL_SECONDS: int = 3600
+
+    # ------------------------------------------------------------------
+    # Performance observability & generic response cache
+    # ------------------------------------------------------------------
+    # 单请求耗时超过该值记为 SLOW_REQUEST（用于定位 P95 尾巴）
+    SLOW_REQUEST_THRESHOLD_MS: int = 800
+    RESPONSE_CACHE_ENABLED: bool = True
+    # 通用 GET 响应缓存 TTL（秒）。写操作会通过代数(gen)整体失效。
+    RESPONSE_CACHE_TTL_SECONDS: int = 60
+    # 单条响应超过该字节数不缓存（避免大列表把 Redis 打爆）
+    RESPONSE_CACHE_MAX_BODY_BYTES: int = 256 * 1024
+    # 不缓存的前缀：流式、鉴权、强实时、导出类接口
+    RESPONSE_CACHE_EXCLUDE_PREFIXES: list[str] = [
+        "/api/v1/auth",
+        "/api/v1/chat",
+        "/api/v1/search",
+        "/api/v1/tasks",
+        "/api/v1/deep-think",
+        "/api/v1/deep_think",
+        "/api/v1/admin/audit-logs",
+        "/api/v1/knowledge",
+        "/api/v1/collaboration",
+    ]
+
+    # ------------------------------------------------------------------
     # Mass Import
     # ------------------------------------------------------------------
     IMPORT_CHECKPOINT_DIR: str = "data/import_checkpoints"

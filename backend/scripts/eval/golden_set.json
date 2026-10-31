@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "description": "RAG 检索质量回归集。每条 query 标注期望命中的法条（law_name + article_number）。article_number 省略时，只要命中该法任意条文即算相关。",
+  "items": [
+    {
+      "id": "lc-010",
+      "query": "公司一直不跟我签书面劳动合同，可以要求什么赔偿",
+      "relevant": [{"law_name": "中华人民共和国劳动合同法", "article_number": "第十条"}],
+      "note": "签订书面劳动合同义务"
+    },
+    {
+      "id": "lc-039",
+      "query": "员工在试用期表现不合格，公司可以直接辞退吗",
+      "relevant": [{"law_name": "中华人民共和国劳动合同法", "article_number": "第三十九条"}],
+      "note": "试用期不符合录用条件的解除"
+    },
+    {
+      "id": "lc-047",
+      "query": "被裁员的经济补偿金怎么计算，工作五年能拿几个月工资",
+      "relevant": [{"law_name": "中华人民共和国劳动合同法", "article_number": "第四十七条"}],
+      "note": "经济补偿计算标准"
+    },
+    {
+      "id": "lc-082",
+      "query": "入职八个月没签合同，能主张双倍工资吗",
+      "relevant": [{"law_name": "中华人民共和国劳动合同法", "article_number": "第八十二条"}],
+      "note": "未签书面劳动合同的双倍工资"
+    },
+    {
+      "id": "lc-087",
+      "query": "公司违法解除劳动合同，赔偿金是经济补偿的两倍吗",
+      "relevant": [{"law_name": "中华人民共和国劳动合同法", "article_number": "第八十七条"}],
+      "note": "违法解除的赔偿金"
+    },
+    {
+      "id": "civ-577",
+      "query": "对方不履行合同约定的义务，要承担什么违约责任",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第五百七十七条"}],
+      "note": "违约责任的一般规定"
+    },
+    {
+      "id": "civ-509",
+      "query": "合同履行过程中要遵循诚信原则吗，需要履行哪些附随义务",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第五百零九条"}],
+      "note": "全面履行与诚信原则"
+    },
+    {
+      "id": "civ-667",
+      "query": "借款合同在法律上是怎么定义的",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第六百六十七条"}],
+      "note": "借款合同定义"
+    },
+    {
+      "id": "civ-675",
+      "query": "借条没写还款日期，出借人什么时候可以要求还钱",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第六百七十五条"}],
+      "note": "借款返还期限"
+    },
+    {
+      "id": "civ-464",
+      "query": "合同的定义是什么，身份关系的协议适用哪部分规定",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第四百六十四条"}],
+      "note": "合同编调整范围"
+    },
+    {
+      "id": "civ-1046",
+      "query": "结婚必须双方完全自愿吗，父母包办婚姻合法吗",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第一千零四十六条"}],
+      "note": "结婚自愿原则"
+    },
+    {
+      "id": "civ-1079",
+      "query": "起诉离婚需要满足什么条件，感情破裂怎么认定",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第一千零七十九条"}],
+      "note": "诉讼离婚与感情破裂"
+    },
+    {
+      "id": "civ-1165",
+      "query": "侵权责任中的过错责任原则是怎么规定的",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第一千一百六十五条"}],
+      "note": "过错侵权责任"
+    },
+    {
+      "id": "civ-1254",
+      "query": "楼上往下扔东西砸伤人，责任由谁承担",
+      "relevant": [{"law_name": "中华人民共和国民法典", "article_number": "第一千二百五十四条"}],
+      "note": "高空抛物侵权责任"
+    },
+    {
+      "id": "cri-232",
+      "query": "故意杀人罪怎么判刑，量刑幅度是多少",
+      "relevant": [{"law_name": "中华人民共和国刑法", "article_number": "第二百三十二条"}],
+      "note": "故意杀人罪"
+    },
+    {
+      "id": "cri-264",
+      "query": "盗窃罪的入罪标准和量刑是什么",
+      "relevant": [{"law_name": "中华人民共和国刑法", "article_number": "第二百六十四条"}],
+      "note": "盗窃罪"
+    },
+    {
+      "id": "cri-266",
+      "query": "电信网络诈骗构成诈骗罪吗，判几年",
+      "relevant": [{"law_name": "中华人民共和国刑法", "article_number": "第二百六十六条"}],
+      "note": "诈骗罪"
+    },
+    {
+      "id": "cri-382",
+      "query": "国家工作人员侵占公款构成什么罪",
+      "relevant": [{"law_name": "中华人民共和国刑法", "article_number": "第三百八十二条"}],
+      "note": "贪污罪"
+    },
+    {
+      "id": "con-033",
+      "query": "宪法规定公民在法律面前一律平等吗",
+      "relevant": [{"law_name": "中华人民共和国宪法", "article_number": "第三十三条"}],
+      "note": "平等权与人权保障"
+    },
+    {
+      "id": "con-038",
+      "query": "人格尊严受宪法保护吗，侮辱诽谤他人是否违宪",
+      "relevant": [{"law_name": "中华人民共和国宪法", "article_number": "第三十八条"}],
+      "note": "人格尊严不受侵犯"
+    }
+  ]
+}
