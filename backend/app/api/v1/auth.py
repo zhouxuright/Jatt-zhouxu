@@ -109,11 +109,13 @@ async def register(
             detail="Email already registered",
         )
 
+    # 注册接口一律创建普通用户：role 只能由管理员在后台授予。
+    # 此前直接透传 payload.role，任何人都能 POST {"role":"admin"} 自助提权。
     user = User(
         username=payload.username,
         email=payload.email,
         hashed_password=_hash_password(payload.password),
-        role=payload.role,
+        role="user",
         # P0-2：注册即绑定租户，避免出现"无租户"的孤儿用户
         tenant_id=get_default_tenant_id(),
     )

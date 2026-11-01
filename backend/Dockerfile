@@ -92,7 +92,13 @@ RUN (sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debi
     libpq-dev \
     wget \
     ffmpeg \
+    tesseract-ocr \
+    tesseract-ocr-chi-sim \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
+# tesseract-ocr + chi_sim: pytesseract 只是 Python 封装，缺二进制时
+#   /api/v1/contract/ocr 会 500 "tesseract is not installed or it's not in your PATH"。
+# poppler-utils: pdf2image 转扫描 PDF 需要 pdftoppm。
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
