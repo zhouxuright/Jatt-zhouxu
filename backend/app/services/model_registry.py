@@ -95,6 +95,15 @@ class ModelRegistry:
         return cls._reranker_model
 
     @staticmethod
+    def _cuda_available() -> bool:
+        """Whether torch can see a CUDA device (cross-encoder needs GPU)."""
+        try:
+            import torch
+            return bool(torch.cuda.is_available())
+        except Exception:  # pragma: no cover - torch is a hard dependency
+            return False
+
+    @staticmethod
     def _pin_torch_threads() -> None:
         """Force torch to a single compute thread.
 
@@ -126,8 +135,19 @@ class ModelRegistry:
         # Load embedding model in thread pool (blocking I/O)
         await loop.run_in_executor(None, cls.get_embedding_model)
 
-        # Load reranker model in thread pool
-        await loop.run_in_executor(None, cls.get_reranker_model)
+        # Load reranker model in thread pool.
+        #
+        # Cross-encoder 重排只在 GPU 上真正执行：CrossEncoderReranker.rerank()
+        # 检测不到 CUDA 时直接按融合顺序返回，根本不会加载模型。CPU 部署
+        # 若仍在这里预热 reranker，只会白占约 1.1GB 常驻内存（生产实测
+        # 容器内存 2.14GiB / limit 3.5GiB），因此这里按可用性跳过。
+        if settings.RAG_RERANK_ENABLED and cls._cuda_available():
+            await loop.run_in_executor(None, cls.get_reranker_model)
+        else:
+            logger.info(
+                "Skipping reranker warmup (rerank_enabled=%s, cuda=%s)",
+                settings.RAG_RERANK_ENABLED, cls._cuda_available(),
+            )
 
         cls._initialized = True
         logger.info("All AI models warmed up and ready")

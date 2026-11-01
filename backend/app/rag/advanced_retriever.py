@@ -332,6 +332,33 @@ def reciprocal_rank_fusion(
     return [doc for _, doc in sorted_items]
 
 
+def _fusion_score(doc: dict[str, Any]) -> float:
+    """Return the best available relevance score for a fused candidate."""
+    for key in ("rrf_score", "score", "bm25_score"):
+        value = doc.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _has_ranking_signal(documents: list[dict[str, Any]]) -> bool:
+    """Whether the candidate head carries a usable score ordering.
+
+    Cross-encoder reranking only pays off when the fused/vector scores
+    actually separate the candidates. If every score is zero or perfectly
+    tied, reranking merely shuffles near-ties while burning CPU, so the
+    caller should skip it.
+    """
+    scores = [_fusion_score(doc) for doc in documents]
+    if not scores or max(scores) <= 0.0:
+        return False
+    return (max(scores) - min(scores)) > 1e-9
+
+
 # ============================================================================
 # Advanced RAG Pipeline
 # ============================================================================
@@ -648,9 +675,23 @@ class AdvancedRAGPipeline:
 
         # Stage 5: Cross-Encoder reranking
         if use_reranker and len(fused) > top_k:
-            reranked = self._reranker.rerank(query, fused, top_k=top_k)
-            logger.info("Cross-encoder reranked: %d → %d results", len(fused), len(reranked))
-            return reranked
+            # 融合后的候选通常有 20~40 条，全量送 cross-encoder 会让重排
+            # 耗时随候选数线性放大，而第 9 名之后几乎没有进入 top_k 的可能。
+            # 因此只重排头部 N 条（N 由 RAG_RERANK_MAX_CANDIDATES 控制）。
+            head = fused[: max(top_k + 1, settings.RAG_RERANK_MAX_CANDIDATES)]
+            if len(head) > top_k and _has_ranking_signal(head):
+                reranked = self._reranker.rerank(query, head, top_k=top_k)
+                logger.info(
+                    "Cross-encoder reranked: %d/%d candidates → %d results",
+                    len(head), len(fused), len(reranked),
+                )
+                return reranked
+            # 低置信度（分数全零或完全并列）时重排只会打乱近似并列的结果，
+            # 白烧 CPU，直接按融合顺序返回。
+            logger.info(
+                "Skipping cross-encoder: %d candidates, no ranking signal",
+                len(head),
+            )
 
         return fused[:top_k]
 

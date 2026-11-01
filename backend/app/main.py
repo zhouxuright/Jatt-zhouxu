@@ -98,7 +98,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.services.model_registry import ModelRegistry
             await ModelRegistry.warmup()
-            logger.info("AI models warmed up: BGE-M3 + BGE-Reranker-V2-M3")
+            stats = ModelRegistry.get_stats()
+            logger.info(
+                "AI models warmed up: embedding=%s reranker=%s",
+                stats.get("embedding_model_loaded"),
+                stats.get("reranker_model_loaded"),
+            )
         except Exception as exc:
             logger.warning("AI model warmup failed: %s (will load on first request)", exc)
     else:

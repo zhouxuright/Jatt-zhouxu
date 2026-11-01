@@ -438,7 +438,7 @@ def retrieve_legal_knowledge(query: str, top_k: int | None = None) -> list[dict[
             top_k=top_k,
             use_bm25=True,
             use_vector=True,
-            use_reranker=True,
+            use_reranker=settings.RAG_RERANK_ENABLED,
         )
         if results:
             logger.info("Advanced RAG: %d results for '%s'", len(results), query[:30])

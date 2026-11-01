@@ -190,6 +190,10 @@ class Settings(BaseSettings):
     RAG_DEFAULT_TOP_K: int = 5
     # CPU 环境下 cross-encoder 重排是主要延迟来源，可临时关闭做对比实验。
     RAG_RERANK_ENABLED: bool = True
+    # 送进 cross-encoder 的候选上限。融合后候选通常有 20~40 条，
+    # 全量送重排会让 CPU 上的重排耗时线性放大；截断到头部 N 条
+    # 既有足够区分度，又把重排成本压到常数级。
+    RAG_RERANK_MAX_CANDIDATES: int = 8
     # 单进程内同时执行的检索条数上限。检索会触发 BGE-M3 编码 + BM25 + Milvus
     # 调用，多个原生调用重叠时会直接段错误（Segmentation fault）而不是 OOM。
     # 默认 1 = 严格串行，全部检索在专用单线程上执行，这是唯一稳定方案。
@@ -237,7 +241,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # 单条 query embedding 的进程内 LRU 大小。BGE-M3 单条 CPU 编码是
     # 1-3s 级开销，同 query 复用时直接命中可省掉这段延迟。
-    RAG_QUERY_EMBEDDING_CACHE_SIZE: int = 256
+    RAG_QUERY_EMBEDDING_CACHE_SIZE: int = 1024
     # BM25 查询结果 LRU 大小。
     RAG_BM25_CACHE_SIZE: int = 128
 
@@ -260,7 +264,7 @@ class Settings(BaseSettings):
     # Performance observability & generic response cache
     # ------------------------------------------------------------------
     # 单请求耗时超过该值记为 SLOW_REQUEST（用于定位 P95 尾巴）
-    SLOW_REQUEST_THRESHOLD_MS: int = 800
+    SLOW_REQUEST_THRESHOLD_MS: int = 1000
     RESPONSE_CACHE_ENABLED: bool = True
     # 通用 GET 响应缓存 TTL（秒）。写操作会通过代数(gen)整体失效。
     RESPONSE_CACHE_TTL_SECONDS: int = 60
