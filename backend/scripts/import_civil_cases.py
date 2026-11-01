@@ -22,7 +22,18 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download
 
 REPO = "Josieeee/ClaimGen-CN"
-DSN = "postgresql://postgres:postgres@localhost:5433/legal_assistant"
+# The DSN used to be hardcoded to `localhost:5433`, which is this project's
+# *local dev* port. On the production host there is no database there, so the
+# script could never run outside a developer machine. Read it from the same
+# env var the app uses and strip the async driver suffix (asyncpg.connect
+# rejects `postgresql+asyncpg://`).
+DSN_FALLBACK = "postgresql://postgres:postgres@localhost:5433/legal_assistant"
+
+
+def resolve_dsn() -> str:
+    raw = os.environ.get("DATABASE_URL") or DSN_FALLBACK
+    return raw.replace("postgresql+asyncpg://", "postgresql://", 1)
+
 
 CASETYPE_KEYWORDS = {
     "劳动争议": ["劳动", "劳务", "工伤", "社保", "养老", "失业", "公积金", "竞业", "报酬", "工资"],
@@ -66,7 +77,7 @@ async def run(path: str, limit: int, stats_only: bool) -> None:
         records = records[:limit]
         print(f"[info] 仅导入前 {limit} 条")
 
-    conn = await asyncpg.connect(DSN)
+    conn = await asyncpg.connect(resolve_dsn())
     rows = []
     for r in records:
         cause = (r.get("cause") or "").strip()
