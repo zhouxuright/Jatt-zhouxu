@@ -207,18 +207,18 @@ async def list_reasoning_models() -> dict[str, Any]:
     """List available reasoning-capable models."""
     models = [
         ReasoningModelInfo(
-            model_id="deepseek-reasoner",
-            name="DeepSeek-R1",
+            model_id="deepseek-flash",
+            name="DeepSeek-Flash",
             provider="deepseek",
-            description="DeepSeek推理模型，支持深度思考和链式推理，擅长复杂法律推理",
+            description="DeepSeek快速模型，并发配额高，支持IRAC分析和多步推理",
             supports_streaming=True,
             is_default=True,
         ),
         ReasoningModelInfo(
-            model_id="deepseek-chat",
-            name="DeepSeek-V3",
+            model_id="deepseek-v4-pro",
+            name="DeepSeek-V4-Pro",
             provider="deepseek",
-            description="DeepSeek对话模型，支持IRAC分析和多步推理",
+            description="DeepSeek高能力模型，支持IRAC分析和多步推理（并发配额低于Flash）",
             supports_streaming=True,
             is_default=False,
         ),
@@ -242,5 +242,5 @@ async def list_reasoning_models() -> dict[str, Any]:
 
     return {
         "models": [m.model_dump() for m in models],
-        "default_model": "deepseek-reasoner",
+        "default_model": "deepseek-flash",
     }

@@ -172,11 +172,41 @@ import { computed, ref, onBeforeUnmount } from 'vue'
 import { UserFilled, Document, ArrowDown, ChatDotRound } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import MarkdownIt from 'markdown-it'
-import hljs from 'highlight.js'
+// Only the core highlighter plus the languages an answer is likely to contain
+// are pulled in.  Importing the default `highlight.js` entry ships all ~190
+// grammars (≈1 MB) even though the AI answer stream never uses more than a
+// handful, so this keeps the chunk small without changing behaviour: any
+// language that is not registered simply renders as plain, escaped code.
+import hljs from 'highlight.js/lib/core'
+import javascript from 'highlight.js/lib/languages/javascript'
+import typescript from 'highlight.js/lib/languages/typescript'
+import python from 'highlight.js/lib/languages/python'
+import java from 'highlight.js/lib/languages/java'
+import sql from 'highlight.js/lib/languages/sql'
+import json from 'highlight.js/lib/languages/json'
+import bash from 'highlight.js/lib/languages/bash'
+import xml from 'highlight.js/lib/languages/xml'
+import yaml from 'highlight.js/lib/languages/yaml'
+import cpp from 'highlight.js/lib/languages/cpp'
+import go from 'highlight.js/lib/languages/go'
+import markdown from 'highlight.js/lib/languages/markdown'
 import 'highlight.js/styles/github.css'
 import FeedbackButtons from './FeedbackButtons.vue'
 import { chatApi } from '@/api/chat'
 import type { Message } from '@/stores/chat'
+
+hljs.registerLanguage('javascript', javascript)
+hljs.registerLanguage('typescript', typescript)
+hljs.registerLanguage('python', python)
+hljs.registerLanguage('java', java)
+hljs.registerLanguage('sql', sql)
+hljs.registerLanguage('json', json)
+hljs.registerLanguage('bash', bash)
+hljs.registerLanguage('xml', xml)
+hljs.registerLanguage('yaml', yaml)
+hljs.registerLanguage('cpp', cpp)
+hljs.registerLanguage('go', go)
+hljs.registerLanguage('markdown', markdown)
 
 const props = withDefaults(defineProps<{
   message: Message

@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import time
 from typing import Any, AsyncGenerator
 
@@ -65,6 +66,17 @@ def _is_transient(exc: Exception) -> bool:
     return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
 
 
+def _is_rate_limited(exc: Exception) -> bool:
+    """429 表示"被限流"，退避后重试才是正确响应，直接放弃会白白丢掉请求。
+
+    DeepSeek 的 429 是账号级并发配额触顶，并发子问题分析时很容易碰到。
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        return response is not None and response.status_code == 429
+    return False
+
+
 # =============================================================================
 # 成本 / 延迟治理工具
 # =============================================================================
@@ -75,6 +87,20 @@ _COST_LEDGER_PREFIX = "legal:llm:cost:"
 # 瞬时错误重试退避。原先固定 sleep 2s 会把 P95 白白拖长一倍；0.5s 足以覆盖
 # TLS/连接抖动，且用户感知不到。
 _RETRY_DELAYS = (0.5,)
+# 429 退避：指数增长 + 抖动。并发子问题同时撞配额时，抖动让重试错峰，
+# 避免所有请求在同一毫秒再次打爆限流窗口。
+_RATE_LIMIT_DELAYS = (2.0, 4.0, 8.0)
+_MAX_ATTEMPTS = max(len(_RETRY_DELAYS), len(_RATE_LIMIT_DELAYS)) + 1
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float | None:
+    """返回本次失败应等待的秒数；None 表示该错误不值得重试。"""
+    if _is_rate_limited(exc):
+        base = _RATE_LIMIT_DELAYS[min(attempt, len(_RATE_LIMIT_DELAYS) - 1)]
+        return base + random.uniform(0, base * 0.25)
+    if _is_transient(exc) and attempt < len(_RETRY_DELAYS):
+        return _RETRY_DELAYS[attempt]
+    return None
 
 
 def _metrics_module():
@@ -169,6 +195,7 @@ def _record_llm_metrics(
 
 # Approximate cost per 1K tokens (USD)
 COST_PER_1K = {
+    "deepseek-flash": {"input": 0.00014, "output": 0.00028},
     "deepseek-chat": {"input": 0.00014, "output": 0.00028},
     "gpt-4o": {"input": 0.0025, "output": 0.01},
     "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
@@ -182,7 +209,7 @@ PROVIDER_CONFIG = {
         "api_key_attr": "DEEPSEEK_API_KEY",
         "api_base_attr": "DEEPSEEK_API_BASE",
         "model_attr": "DEEPSEEK_MODEL",
-        "default_model": "deepseek-chat",
+        "default_model": "deepseek-flash",
     },
     "openai": {
         "api_key_attr": "OPENAI_API_KEY",
@@ -305,7 +332,7 @@ class LLMService:
         errors: list[str] = []
 
         for provider_name in providers:
-            for attempt in range(len(_RETRY_DELAYS) + 1):
+            for attempt in range(_MAX_ATTEMPTS):
                 try:
                     result = await self._chat_provider(
                         provider_name=provider_name,
@@ -322,11 +349,11 @@ class LLMService:
                     return result
                 except Exception as exc:
                     err_text = _format_exc(exc)
-                    if _is_transient(exc) and attempt < len(_RETRY_DELAYS):
-                        delay = _RETRY_DELAYS[attempt]
+                    delay = _retry_delay(exc, attempt)
+                    if delay is not None:
                         logger.warning(
-                            "Provider '%s' failed (attempt %d): %s — retrying in %.1fs",
-                            provider_name, attempt + 1, err_text, delay,
+                            "Provider '%s' failed (attempt %d, rate_limited=%s): %s — retrying in %.1fs",
+                            provider_name, attempt + 1, _is_rate_limited(exc), err_text, delay,
                         )
                         await asyncio.sleep(delay)
                         continue
@@ -415,7 +442,7 @@ class LLMService:
         errors: list[str] = []
 
         for provider_name in providers:
-            for attempt in range(len(_RETRY_DELAYS) + 1):
+            for attempt in range(_MAX_ATTEMPTS):
                 yielded_any = False
                 try:
                     async for chunk in self._chat_stream_provider(
@@ -434,11 +461,11 @@ class LLMService:
                 except Exception as exc:
                     err_text = _format_exc(exc)
                     # 已经吐字后再重试会产生重复内容，因此只允许"未出字"重试
-                    if _is_transient(exc) and not yielded_any and attempt < len(_RETRY_DELAYS):
-                        delay = _RETRY_DELAYS[attempt]
+                    delay = _retry_delay(exc, attempt) if not yielded_any else None
+                    if delay is not None:
                         logger.warning(
-                            "Provider '%s' streaming failed (attempt %d): %s — retrying in %.1fs",
-                            provider_name, attempt + 1, err_text, delay,
+                            "Provider '%s' streaming failed (attempt %d, rate_limited=%s): %s — retrying in %.1fs",
+                            provider_name, attempt + 1, _is_rate_limited(exc), err_text, delay,
                         )
                         await asyncio.sleep(delay)
                         continue
@@ -525,7 +552,8 @@ class LLMService:
         await _ledger_record(model_name, input_tokens, output_tokens, cost)
 
         return {
-            "content": choice["message"]["content"],
+            "content": choice["message"].get("content") or "",
+            "reasoning_content": choice["message"].get("reasoning_content") or "",
             "model": data.get("model", model_name),
             "provider": provider_name,
             "tokens": {

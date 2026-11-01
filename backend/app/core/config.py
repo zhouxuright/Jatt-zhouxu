@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_API_BASE: str = "https://api.deepseek.com/v1"
-    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_MODEL: str = "deepseek-flash"
 
     # ------------------------------------------------------------------
     # LLM: OpenAI

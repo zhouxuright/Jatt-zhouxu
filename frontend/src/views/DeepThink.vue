@@ -35,8 +35,8 @@
       <div class="input-actions">
         <div class="input-left">
           <el-select v-model="selectedModel" style="width: 220px" placeholder="推理模型">
-            <el-option label="DeepSeek-R1 (推荐)" value="deepseek-reasoner" />
-            <el-option label="DeepSeek-V3" value="deepseek-chat" />
+            <el-option label="DeepSeek-Flash (推荐)" value="deepseek-flash" />
+            <el-option label="DeepSeek-V4-Pro (更强推理)" value="deepseek-v4-pro" />
           </el-select>
           <el-select v-model="analysisDepth" style="width: 150px" placeholder="分析深度">
             <el-option label="标准分析" value="standard" />
@@ -376,7 +376,7 @@ interface RuleCitation {
 }
 
 const query = ref('')
-const selectedModel = ref('deepseek-reasoner')
+const selectedModel = ref('deepseek-flash')
 const analysisDepth = ref('deep')
 const isThinking = ref(false)
 const currentStep = ref(0)

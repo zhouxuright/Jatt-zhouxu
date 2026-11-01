@@ -410,9 +410,25 @@ class SkillEngine:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            content = result.get("content") or ""
+            if not content.strip():
+                # 推理模型（如 deepseek-flash）可能把 max_tokens 全部用于
+                # reasoning_content，导致正文为空；优先回退推理内容。
+                content = result.get("reasoning_content") or ""
+            if not content.strip():
+                tokens = result.get("tokens", {})
+                return {
+                    "success": False,
+                    "error": (
+                        f"LLM 返回内容为空（max_tokens={max_tokens}，"
+                        f"output_tokens={tokens.get('output')}，"
+                        f"finish_reason={result.get('finish_reason')}）"
+                    ),
+                    "tokens": tokens,
+                }
             return {
                 "success": True,
-                "content": result.get("content", ""),
+                "content": content,
                 "tokens": result.get("tokens", {}),
             }
         except Exception as exc:
@@ -670,6 +686,7 @@ def _labor_dispute_skill() -> SkillDefinition:
                     "system_prompt": "你是一位专业的劳动法律师，擅长处理各类劳动争议案件。",
                     "prompt": "请分析以下劳动争议案件，提取关键法律要素：\n\n案情描述：{input.dispute_description}\n\n请分析：\n1. 争议类型和性质\n2. 关键时间节点（入职日期、争议发生日期、仲裁时效等）\n3. 双方权利义务关系\n4. 核心争议焦点\n5. 适用的法律法规\n6. 初步法律意见",
                     "temperature": 0.3,
+                    "max_tokens": 8192,
                 },
             ),
             SkillStep(
@@ -880,6 +897,7 @@ def _criminal_defense_skill() -> SkillDefinition:
                     "system_prompt": "你是刑事辩护律师。请基于事实和法律进行客观分析。注意：你的分析仅供参考，不构成正式辩护意见。",
                     "prompt": "请分析以下刑事案件：\n\n案情描述：{input.case_description}\n指控罪名：{input.charge}\n诉讼阶段：{input.stage}\n\n请分析：\n1. 案件基本事实\n2. 可能的辩护方向\n3. 量刑情节分析\n4. 程序性权利保障\n5. 法律建议",
                     "temperature": 0.3,
+                    "max_tokens": 8192,
                 },
             ),
             SkillStep(
@@ -2738,6 +2756,7 @@ def _case_strategy_planning_skill() -> SkillDefinition:
                         "5. 适用的法律法规和司法解释\n6. 类似案例裁判倾向"
                     ),
                     "temperature": 0.3,
+                    "max_tokens": 8192,
                 },
             ),
             SkillStep(

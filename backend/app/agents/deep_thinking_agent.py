@@ -27,6 +27,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
 from app.agents.base_agent import BaseAgent, AgentState
+from app.core.config import settings
 from app.services.llm_service import get_raw_llm_service, get_llm_service, LLMService
 
 logger = logging.getLogger(__name__)
@@ -138,11 +139,14 @@ class DeepThinkingAgent:
         # Phase 1: Problem Decomposition
         decomposition = await self._decompose_problem(query, rag_context)
 
-        # Phase 2: IRAC Analysis for each sub-issue
-        irac_results = []
-        for sub_issue in decomposition.get("sub_issues", [])[:max_sub_issues]:
-            irac = await self._irac_analysis(query, sub_issue, rag_context)
-            irac_results.append(irac)
+        # Phase 2: IRAC Analysis for each sub-issue — the sub-issues are
+        # independent, so they run concurrently (expert depth goes from 8
+        # sequential LLM calls to roughly one call of wall-clock latency).
+        irac_results = await self._irac_analysis_batch(
+            query,
+            decomposition.get("sub_issues", [])[:max_sub_issues],
+            rag_context,
+        )
 
         # Phase 3: Self-Verification (skipped at "standard" depth)
         if run_verification:
@@ -214,7 +218,7 @@ class DeepThinkingAgent:
             irac_analysis=irac_results[0] if irac_results else {},
             verification_notes=verification.get("notes", []),
             elapsed_seconds=elapsed,
-            model_used=self._model_override or "deepseek-chat",
+            model_used=self._model_override or settings.DEEPSEEK_MODEL,
             tokens_used=final_answer.get("tokens", {}).get("total", 0),
             metadata={
                 "sub_issues_count": len(decomposition.get("sub_issues", [])),
@@ -318,6 +322,10 @@ class DeepThinkingAgent:
         emitted_citations: list[dict[str, str]] = []
         emitted_labels: set[str] = set()
         sub_issues = decomposition.get("sub_issues", [])[:max_sub_issues]
+        # Analyse every sub-issue concurrently up front, then stream the results
+        # in the original 1..N order: SSE consumers, citation de-duplication and
+        # the final ``irac_payload`` all rely on that ordering.
+        irac_batch = await self._irac_analysis_batch(query, sub_issues, rag_context)
         for i, sub_issue in enumerate(sub_issues):
             yield {
                 "type": "phase_start",
@@ -326,7 +334,7 @@ class DeepThinkingAgent:
                 "message": f"正在分析子问题 {i+1}/{len(sub_issues)}: {sub_issue[:50]}...",
             }
 
-            irac = await self._irac_analysis(query, sub_issue, rag_context)
+            irac = irac_batch[i]
             irac_results.append(irac)
             confidence = irac.get("confidence", 0.7)
             citations = self._extract_law_citations(str(irac.get("rule", "")))
@@ -558,6 +566,49 @@ class DeepThinkingAgent:
     # Phase 2: IRAC Analysis
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _irac_fallback(sub_issue: str) -> dict[str, Any]:
+        """Low-confidence placeholder so one failed sub-issue cannot abort a run."""
+        return {
+            "issue": sub_issue,
+            "rule": "需要进一步检索相关法律条文",
+            "application": "待分析",
+            "conclusion": "待得出",
+            "confidence": 0.3,
+            "reasoning_quality": "low",
+        }
+
+    async def _irac_analysis_batch(
+        self, original_query: str, sub_issues: list[str], rag_context: str
+    ) -> list[dict[str, str]]:
+        """Analyse every sub-issue concurrently, keeping the input ordering.
+
+        ``asyncio.gather`` returns results positionally, so the caller can still
+        emit events and build the final IRAC payload in 1..N order.
+        """
+        if not sub_issues:
+            return []
+
+        gathered = await asyncio.gather(
+            *(
+                self._irac_analysis(original_query, sub_issue, rag_context)
+                for sub_issue in sub_issues
+            ),
+            return_exceptions=True,
+        )
+
+        results: list[dict[str, str]] = []
+        for index, sub_issue in enumerate(sub_issues):
+            result = gathered[index]
+            if isinstance(result, dict):
+                results.append(result)
+                continue
+            logger.warning(
+                "IRAC analysis crashed for sub-issue %d: %s", index + 1, result
+            )
+            results.append(self._irac_fallback(sub_issue))
+        return results
+
     async def _irac_analysis(
         self, original_query: str, sub_issue: str, rag_context: str
     ) -> dict[str, str]:
@@ -607,14 +658,7 @@ IRAC方法：
         except Exception as exc:
             logger.warning("IRAC analysis failed for '%s': %s", sub_issue[:30], exc)
 
-        return {
-            "issue": sub_issue,
-            "rule": "需要进一步检索相关法律条文",
-            "application": "待分析",
-            "conclusion": "待得出",
-            "confidence": 0.3,
-            "reasoning_quality": "low",
-        }
+        return self._irac_fallback(sub_issue)
 
     # -------------------------------------------------------------------------
     # Phase 3: Self-Verification
