@@ -40,7 +40,7 @@
             v-model="form.password"
             :prefix-icon="Lock"
             type="password"
-            placeholder="请输入密码（至少6位）"
+            placeholder="请输入密码（6-50位，含字母和数字）"
             show-password
           />
         </el-form-item>
@@ -137,6 +137,15 @@ const rules: FormRules = {
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
     { min: 6, max: 50, message: '密码长度在 6 到 50 个字符之间', trigger: 'blur' },
+    {
+      validator: (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+        if (!value) return callback()
+        if (!/[a-zA-Z]/.test(value)) return callback(new Error('密码必须包含至少一个字母'))
+        if (!/[0-9]/.test(value)) return callback(new Error('密码必须包含至少一个数字'))
+        callback()
+      },
+      trigger: 'blur',
+    },
   ],
   confirmPassword: [
     { required: true, message: '请再次输入密码', trigger: 'blur' },

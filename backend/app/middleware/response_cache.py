@@ -27,6 +27,7 @@ in-process dict, and if anything goes wrong it just passes the request through.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -42,11 +43,20 @@ _GEN_KEY = "legal:rc:gen"
 _KEY_PREFIX = "legal:rc:"
 _MEM_MAX_ENTRIES = 512
 _GEN_CACHE_SECONDS = 1.0
+# How long a follower waits for the leader holding the same cache key. LLM-free
+# read endpoints answer in well under a second; the cap only guards against a
+# leader that dies without firing its event.
+_SINGLEFLIGHT_WAIT_SECONDS = 15.0
 
 # Bounded in-process fallback: key -> (expires_at, payload_bytes)
 _mem_cache: dict[str, tuple[float, bytes]] = {}
 _mem_generation = 0
 _gen_cache: tuple[float, int] | None = None
+
+# Single-flight: key -> event that the computing leader sets when it is done.
+# Concurrent identical GETs (same key, cache cold) then wait for one computation
+# instead of each recomputing the same expensive query (thundering herd).
+_inflight: dict[str, asyncio.Event] = {}
 
 
 def _header_value(scope: dict[str, Any], name: bytes) -> bytes:
@@ -171,6 +181,21 @@ class ResponseCacheMiddleware:
             payload,
         )
 
+    async def _send_cached(
+        self, send: Any, cached: tuple[int, str, bytes], cache_header: bytes
+    ) -> None:
+        status, content_type, body = cached
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", content_type.encode("latin-1")),
+                (b"content-length", str(len(body)).encode("latin-1")),
+                (b"x-cache", cache_header),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
     # ------------------------------------------------------------------
     # ASGI entrypoint
     # ------------------------------------------------------------------
@@ -195,21 +220,35 @@ class ResponseCacheMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Never route streaming endpoints through the cache/single-flight path:
+        # a follower would otherwise wait for the leader's *whole* stream to end
+        # before it even starts producing output.
+        if path.endswith("/stream") or path.endswith("-stream"):
+            await self.app(scope, receive, send)
+            return
+
         key = _cache_key(scope, await self._generation())
         cached = await self._get(key)
         if cached is not None:
-            status, content_type, body = cached
-            await send({
-                "type": "http.response.start",
-                "status": status,
-                "headers": [
-                    (b"content-type", content_type.encode("latin-1")),
-                    (b"content-length", str(len(body)).encode("latin-1")),
-                    (b"x-cache", b"HIT"),
-                ],
-            })
-            await send({"type": "http.response.body", "body": body})
+            await self._send_cached(send, cached, b"HIT")
             return
+
+        # Single-flight: a concurrent identical request may already be computing
+        # this key. Wait for it instead of hammering the database again.
+        peer = _inflight.get(key)
+        if peer is not None:
+            try:
+                await asyncio.wait_for(peer.wait(), timeout=_SINGLEFLIGHT_WAIT_SECONDS)
+            except Exception:
+                pass  # timeout / foreign loop / cancelled: fall back to computing
+            cached = await self._get(key)
+            if cached is not None:
+                await self._send_cached(send, cached, b"HIT")
+                return
+
+        # Become the leader for this key (followers arriving now will wait on us).
+        leader = asyncio.Event()
+        _inflight[key] = leader
 
         start_headers: list[tuple[bytes, bytes]] = []
         status_code = 200
@@ -252,13 +291,17 @@ class ResponseCacheMiddleware:
 
         try:
             await self.app(scope, receive, send_capture)
-        except Exception:
-            raise
         finally:
-            if (
-                cacheable
-                and status_code == 200
-                and "application/json" in content_type.lower()
-                and chunks
-            ):
-                await self._set(key, status_code, content_type, b"".join(chunks))
+            try:
+                if (
+                    cacheable
+                    and status_code == 200
+                    and "application/json" in content_type.lower()
+                    and chunks
+                ):
+                    await self._set(key, status_code, content_type, b"".join(chunks))
+            finally:
+                # Release followers even if caching failed or the app raised.
+                if _inflight.get(key) is leader:
+                    _inflight.pop(key, None)
+                leader.set()

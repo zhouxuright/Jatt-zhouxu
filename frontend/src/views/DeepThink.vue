@@ -561,13 +561,22 @@ function handleStreamEvent(event: any) {
         case 'legal_retrieval':
           currentStep.value = 2
           break
+        case 'irac':
+          currentStep.value = 3
+          break
         case 'multi_angle':
           currentStep.value = 3
           break
         case 'risk_assessment':
           currentStep.value = 4
           break
+        case 'verification':
+          currentStep.value = 4
+          break
         case 'conclusion':
+          currentStep.value = 5
+          break
+        case 'synthesis':
           currentStep.value = 5
           break
       }

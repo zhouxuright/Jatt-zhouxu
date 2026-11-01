@@ -75,6 +75,38 @@
               v-model="formData[String(key)]"
               style="width: 100%"
             />
+            <div v-else-if="(prop as any).type === 'object'" class="object-field-group">
+              <template v-if="hasSubProps(prop)">
+                <div
+                  v-for="(subProp, subKey) in (prop as any).properties"
+                  :key="String(subKey)"
+                  class="object-field"
+                >
+                  <span class="object-field-label">
+                    {{ (subProp as any).description || String(subKey) }}
+                  </span>
+                  <el-input-number
+                    v-if="(subProp as any).type === 'number'"
+                    v-model="formData[String(key)][String(subKey)]"
+                    style="width: 100%"
+                  />
+                  <el-input
+                    v-else
+                    v-model="formData[String(key)][String(subKey)]"
+                    :placeholder="(subProp as any).description || ''"
+                    clearable
+                  />
+                </div>
+              </template>
+              <el-input
+                v-else
+                type="textarea"
+                :rows="3"
+                :model-value="objectDrafts[String(key)]"
+                placeholder='请填写 JSON，例如 {"name": "张三"}'
+                @update:model-value="(val: string) => applyObjectJson(String(key), val)"
+              />
+            </div>
           </el-form-item>
         </el-form>
       </div>
@@ -126,8 +158,49 @@ const dialogVisible = ref(false)
 const resultVisible = ref(false)
 const selectedSkill = ref<Skill | null>(null)
 const formData = ref<Record<string, any>>({})
+const objectDrafts = ref<Record<string, string>>({})
 const isExecuting = ref(false)
 const execResult = ref<any>(null)
+
+/** Whether an `object` schema prop declares concrete sub-fields. */
+function hasSubProps(prop: any): boolean {
+  return !!prop?.properties && Object.keys(prop.properties).length > 0
+}
+
+/** Parse the JSON fallback textarea into formData (schema without `properties`). */
+function applyObjectJson(key: string, raw: string) {
+  objectDrafts.value = { ...objectDrafts.value, [key]: raw }
+  if (!raw.trim()) {
+    formData.value[key] = {}
+    return
+  }
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      formData.value[key] = parsed
+    }
+  } catch {
+    // Invalid JSON: keep the draft so the user can fix it; validated on submit.
+  }
+}
+
+/** Keys whose JSON draft cannot be parsed — blocks submission with a clear hint. */
+function invalidObjectKeys(): string[] {
+  const props = selectedSkill.value?.input_schema?.properties || {}
+  const invalid: string[] = []
+  for (const [key, prop] of Object.entries<any>(props)) {
+    if ((prop as any).type !== 'object' || hasSubProps(prop)) continue
+    const raw = (objectDrafts.value[key] || '').trim()
+    if (!raw) continue
+    try {
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) invalid.push(key)
+    } catch {
+      invalid.push(key)
+    }
+  }
+  return invalid
+}
 
 function getCategoryLabel(cat: string) {
   const map: Record<string, string> = {
@@ -164,12 +237,42 @@ async function loadSkills() {
 
 function openSkillDialog(skill: Skill) {
   selectedSkill.value = skill
-  formData.value = {}
+  const props: Record<string, any> = skill.input_schema?.properties || {}
+  const init: Record<string, any> = {}
+  const drafts: Record<string, string> = {}
+
+  for (const [key, prop] of Object.entries<any>(props)) {
+    const type = (prop as any)?.type
+    if (type === 'object' && hasSubProps(prop)) {
+      const nested: Record<string, any> = {}
+      for (const [subKey, subProp] of Object.entries<any>((prop as any).properties)) {
+        nested[subKey] = (subProp as any)?.type === 'number' ? undefined : ''
+      }
+      init[key] = nested
+    } else if (type === 'object') {
+      init[key] = {}
+      drafts[key] = ''
+    } else if (type === 'number') {
+      init[key] = undefined
+    } else {
+      init[key] = ''
+    }
+  }
+
+  formData.value = init
+  objectDrafts.value = drafts
   dialogVisible.value = true
 }
 
 async function executeSkill() {
   if (!selectedSkill.value) return
+
+  const invalid = invalidObjectKeys()
+  if (invalid.length > 0) {
+    ElMessage.warning(`以下字段需要填写合法的 JSON 对象：${invalid.join('、')}`)
+    return
+  }
+
   isExecuting.value = true
 
   try {
@@ -281,5 +384,28 @@ onMounted(loadSkills)
 .result-summary h4 {
   color: var(--primary-color);
   margin: 0 0 8px;
+}
+
+.object-field-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-color);
+}
+
+.object-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.object-field-label {
+  flex: 0 0 110px;
+  font-size: 13px;
+  color: var(--text-regular);
 }
 </style>

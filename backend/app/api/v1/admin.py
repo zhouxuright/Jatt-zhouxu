@@ -378,7 +378,7 @@ class CorpusRegistryResponse(BaseModel):
     summary="法律语料资产与来源治理台账",
 )
 async def get_corpus_registry(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_admin_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CorpusRegistryResponse:
     """Return the measured legal-corpus inventory with provenance labels.

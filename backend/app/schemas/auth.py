@@ -15,13 +15,17 @@ class UserCreate(BaseModel):
     """Schema for user registration."""
     username: str = Field(..., min_length=2, max_length=64, description="Unique username")
     email: str = Field(..., description="Valid email address")
-    password: str = Field(..., min_length=8, max_length=128, description="Plain-text password")
+    password: str = Field(..., min_length=6, max_length=50, description="Plain-text password")
     role: str = Field(default="user", description="User role: user, admin, lawyer")
+    agreed_to_terms: bool = Field(
+        default=True,
+        description="Whether the user accepted the User Agreement and Privacy Policy",
+    )
 
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str) -> str:
-        """Password must be at least 8 characters and contain both a letter and a digit."""
+        """Password must be 6-50 characters and contain both a letter and a digit."""
         if not re.search(r"[a-zA-Z]", v):
             raise ValueError("密码必须包含至少一个字母")
         if not re.search(r"[0-9]", v):

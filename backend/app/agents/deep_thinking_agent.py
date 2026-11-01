@@ -223,6 +223,33 @@ class DeepThinkingAgent:
             },
         )
 
+    _LAW_REF_RE = re.compile(
+        r"《([^》]{1,40})》(?:\s*(第[一二三四五六七八九十百千零〇0-9]+条"
+        r"(?:第[一二三四五六七八九十百千零〇0-9]+款)?"
+        r"(?:第[一二三四五六七八九十百千零〇0-9]+项)?))?"
+    )
+
+    @classmethod
+    def _extract_law_citations(cls, text: str) -> list[dict[str, str]]:
+        """Extract 《法律名》第X条 references from LLM prose.
+
+        The streaming contract the UI consumes expects
+        ``{"text": ..., "url": ...}`` items for the IRAC "Rule" panel and
+        ``{"title", "detail", "url", "type"}`` items for the citation list.
+        Both are derived from this single extraction pass.
+        """
+        citations: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for match in cls._LAW_REF_RE.finditer(text or ""):
+            law_name = match.group(1).strip()
+            article = (match.group(2) or "").strip()
+            label = f"《{law_name}》{article}" if article else f"《{law_name}》"
+            if label in seen:
+                continue
+            seen.add(label)
+            citations.append({"text": label, "url": ""})
+        return citations[:12]
+
     def _depth_policy(self, depth: str) -> tuple[int, bool]:
         """Map the UI's 分析深度 setting to real work limits.
 
@@ -272,8 +299,24 @@ class DeepThinkingAgent:
             "message": f"问题分解完成，识别出 {len(decomposition.get('sub_issues', []))} 个子问题",
         }
 
+        # Reasoning step for the decomposition phase (drives the CoT cards).
+        reasoning_steps_count = 1
+        yield {
+            "type": "reasoning_step",
+            "phase": "decomposition",
+            "data": {
+                "step_type": "issue",
+                "title": "问题分解",
+                "content": decomposition.get("analysis", ""),
+                "confidence": decomposition.get("confidence", 0.7),
+                "sources": decomposition.get("legal_domains", []),
+            },
+        }
+
         # Phase 2: IRAC Analysis (stream each sub-issue)
         irac_results = []
+        emitted_citations: list[dict[str, str]] = []
+        emitted_labels: set[str] = set()
         sub_issues = decomposition.get("sub_issues", [])[:max_sub_issues]
         for i, sub_issue in enumerate(sub_issues):
             yield {
@@ -285,7 +328,71 @@ class DeepThinkingAgent:
 
             irac = await self._irac_analysis(query, sub_issue, rag_context)
             irac_results.append(irac)
+            confidence = irac.get("confidence", 0.7)
+            citations = self._extract_law_citations(str(irac.get("rule", "")))
 
+            # Contract consumed by DeepThink.vue: flat IRAC fields + citations.
+            yield {
+                "type": "irac_update",
+                "phase": "irac",
+                "sub_issue_index": i,
+                "data": {
+                    "sub_issue": sub_issue,
+                    "issue": irac.get("issue", ""),
+                    "rule": irac.get("rule", ""),
+                    "application": irac.get("application", ""),
+                    "conclusion": irac.get("conclusion", ""),
+                    "citations": citations,
+                    "confidence": confidence,
+                },
+            }
+
+            for step_type, label in (
+                ("issue", "争点识别"),
+                ("rule", "适用规则"),
+                ("application", "规则适用"),
+                ("conclusion", "得出结论"),
+            ):
+                yield {
+                    "type": "reasoning_step",
+                    "phase": "irac",
+                    "sub_issue_index": i,
+                    "data": {
+                        "step_type": step_type,
+                        "title": f"子问题 {i+1} · {label}",
+                        "content": str(irac.get(step_type, "")),
+                        "confidence": confidence,
+                        "sources": [],
+                    },
+                }
+                reasoning_steps_count += 1
+
+            for cite in citations:
+                if cite["text"] in emitted_labels:
+                    continue
+                emitted_labels.add(cite["text"])
+                entry = {
+                    "title": cite["text"],
+                    "detail": f"子问题 {i+1} 适用规则引用",
+                    "url": cite["url"],
+                    "type": "法律",
+                }
+                emitted_citations.append(entry)
+                yield {
+                    "type": "source_citation",
+                    "phase": "irac",
+                    "sub_issue_index": i,
+                    "data": entry,
+                }
+
+            yield {
+                "type": "confidence_update",
+                "phase": "irac",
+                "sub_issue_index": i,
+                "confidence": confidence,
+            }
+
+            # Kept for backward compatibility with non-UI SSE consumers.
             yield {
                 "type": "irac_complete",
                 "sub_issue_index": i,
@@ -328,6 +435,27 @@ class DeepThinkingAgent:
 
         # Phase 4: Final Answer (streamed token by token)
         yield {
+            "type": "confidence_update",
+            "phase": "verification",
+            "confidence": verification.get("overall_confidence", 0.7),
+        }
+        yield {
+            "type": "reasoning_step",
+            "phase": "verification",
+            "data": {
+                "step_type": "verification",
+                "title": "自我验证",
+                "content": "\n".join(
+                    list(verification.get("notes", []))
+                    + list(verification.get("issues_found", []))
+                ),
+                "confidence": verification.get("overall_confidence", 0.7),
+                "sources": [],
+            },
+        }
+        reasoning_steps_count += 1
+
+        yield {
             "type": "phase_start",
             "phase": "synthesis",
             "message": "正在生成最终回答...",
@@ -343,15 +471,34 @@ class DeepThinkingAgent:
                 "content": token,
             }
 
+        # Flatten multi-sub-issue IRAC into the single object the UI renders.
+        if not irac_results:
+            irac_payload: dict[str, str] = {}
+        elif len(irac_results) == 1:
+            irac_payload = {
+                key: str(irac_results[0].get(key, ""))
+                for key in ("issue", "rule", "application", "conclusion")
+            }
+        else:
+            irac_payload = {
+                key: "\n\n".join(
+                    f"[子问题 {i + 1}] {str(irac.get(key, ''))}"
+                    for i, irac in enumerate(irac_results)
+                )
+                for key in ("issue", "rule", "application", "conclusion")
+            }
+
         elapsed = time.time() - start_time
         yield {
             "type": "thinking_complete",
             "final_answer": final_content,
             "elapsed_seconds": round(elapsed, 2),
             "confidence": verification.get("overall_confidence", 0.7),
-            "reasoning_steps_count": len(sub_issues) * 4 + 2,
+            "reasoning_steps_count": reasoning_steps_count,
             "sub_issues_count": len(sub_issues),
             "verification_passed": verification.get("passed", False),
+            "irac": irac_payload,
+            "source_citations": emitted_citations,
         }
 
     # -------------------------------------------------------------------------

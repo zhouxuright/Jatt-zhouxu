@@ -476,20 +476,33 @@ class SkillEngine:
     def _resolve_template_string(
         self, template: str, context: dict[str, Any]
     ) -> str:
-        """Resolve {context.key} and {input.key} placeholders."""
+        """Resolve ``{input.key}`` / ``{results.key}`` / ``{context.key}`` placeholders.
+
+        The namespace prefix is part of the lookup path: ``{input.dispute_description}``
+        must read ``context["input"]["dispute_description"]``.  The previous
+        implementation dropped the prefix and searched the *top-level* context,
+        which made every template resolve to ``""`` -- the reason a skill received
+        the user's case description yet told the LLM "案情描述为空白".
+        """
         import re
-        pattern = r'\{(?:context|input|results)\.([^}]+)\}'
+        pattern = r"\{(context|input|results)\.([^}]+)\}"
 
         def replacer(match: re.Match) -> str:
-            key_path = match.group(1)
-            parts = key_path.split(".")
-            value = context
-            for part in parts:
+            namespace, key_path = match.group(1), match.group(2)
+            value: Any = context.get(namespace, {})
+            for part in key_path.split("."):
                 if isinstance(value, dict):
                     value = value.get(part, "")
+                elif isinstance(value, (list, tuple)) and part.isdigit():
+                    index = int(part)
+                    value = value[index] if 0 <= index < len(value) else ""
                 else:
                     return ""
-            return str(value) if value is not None else ""
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False)
+            return str(value)
 
         return re.sub(pattern, replacer, template)
 
@@ -623,8 +636,26 @@ def _labor_dispute_skill() -> SkillDefinition:
             "type": "object",
             "properties": {
                 "dispute_description": {"type": "string", "description": "劳动争议描述"},
-                "employee_info": {"type": "object", "description": "劳动者信息"},
-                "employer_info": {"type": "object", "description": "用人单位信息"},
+                "employee_info": {
+                    "type": "object",
+                    "description": "劳动者信息",
+                    "properties": {
+                        "name": {"type": "string", "description": "姓名"},
+                        "entry_date": {"type": "string", "description": "入职日期"},
+                        "monthly_salary": {"type": "number", "description": "月薪（元）"},
+                        "work_years": {"type": "number", "description": "工作年限"},
+                        "contract_type": {"type": "string", "description": "合同类型"},
+                    },
+                },
+                "employer_info": {
+                    "type": "object",
+                    "description": "用人单位信息",
+                    "properties": {
+                        "company_name": {"type": "string", "description": "单位名称"},
+                        "industry": {"type": "string", "description": "所属行业"},
+                        "location": {"type": "string", "description": "所在地"},
+                    },
+                },
                 "dispute_type": {"type": "string", "enum": ["工资纠纷", "违法解雇", "工伤赔偿", "社保纠纷", "竞业限制", "其他"]},
             },
             "required": ["dispute_description"],
@@ -920,8 +951,24 @@ def _litigation_preparation_skill() -> SkillDefinition:
             "properties": {
                 "case_description": {"type": "string", "description": "案件描述"},
                 "claim_amount": {"type": "number", "description": "诉讼标的额"},
-                "plaintiff_info": {"type": "object", "description": "原告信息"},
-                "defendant_info": {"type": "object", "description": "被告信息"},
+                "plaintiff_info": {
+                    "type": "object",
+                    "description": "原告信息",
+                    "properties": {
+                        "name": {"type": "string", "description": "名称/姓名"},
+                        "entity_type": {"type": "string", "description": "主体类型（自然人/法人）"},
+                        "address": {"type": "string", "description": "住所地"},
+                    },
+                },
+                "defendant_info": {
+                    "type": "object",
+                    "description": "被告信息",
+                    "properties": {
+                        "name": {"type": "string", "description": "名称/姓名"},
+                        "entity_type": {"type": "string", "description": "主体类型（自然人/法人）"},
+                        "address": {"type": "string", "description": "住所地"},
+                    },
+                },
             },
             "required": ["case_description"],
         },
@@ -981,7 +1028,15 @@ def _debt_recovery_skill() -> SkillDefinition:
                 "debt_description": {"type": "string", "description": "债务情况描述"},
                 "debt_amount": {"type": "number", "description": "债务金额"},
                 "debt_date": {"type": "string", "description": "债务发生日期"},
-                "debtor_info": {"type": "object", "description": "债务人信息"},
+                "debtor_info": {
+                    "type": "object",
+                    "description": "债务人信息",
+                    "properties": {
+                        "name": {"type": "string", "description": "名称/姓名"},
+                        "contact": {"type": "string", "description": "联系方式"},
+                        "address": {"type": "string", "description": "住所地"},
+                    },
+                },
             },
             "required": ["debt_description"],
         },
