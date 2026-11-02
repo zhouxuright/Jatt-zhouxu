@@ -3,9 +3,11 @@
 基于 AI 大模型的中国法律智能助手平台，提供法律咨询、合同审查、文书生成、
 法规与案例检索、诉讼支持、企业合规等智能服务。
 
+> 🆕 **2026-11-02 更新**：法条语料按条级重建并全量重灌 Milvus（40,770 条，向量编码改为「条文首句 + 正文」）、完成向量库 compact、补充单机生产部署（`docker-compose.cloud.yml`）说明。
+>
 > 🆕 **2026-10-08 更新**：新增工作台 Dashboard、数据溯源过滤（RAG 检索自动排除合成数据）、LLM 驱动的高质量数据增强管道（DeepSeek）、数据质量门控。项目已按 MIT 许可完全开源。
 >
-> **文档状态**：本次修订于 2026-10-08，所有数字均为**直连生产库实测**，非设计目标。
+> **文档状态**：本次修订于 2026-11-02，数据规模与端口均为**直连生产库实测**，非设计目标。
 
 ## 项目概述
 
@@ -91,36 +93,42 @@
               └── general              → 通用回复
 ```
 
-## 数据规模（2026-09-24 直连数据库实测）
+## 数据规模（2026-11-02 直连生产库实测）
 
 ### PostgreSQL
 
 | 表 | 内容 | 行数 | 可否作为法律依据引用 |
 | --- | --- | ---: | --- |
-| `legal_articles` | 法条 | 686,906 | ✅ 权威 |
-| `laws` | 法规 | 18,580 | ✅ 权威 |
-| `judicial_interpretations` | 司法解释 | 219 | ✅ 权威 |
-| `legal_cross_references` | 法条交叉引用 | 20,219 | ✅ 可商用 |
-| `court_cases` | 案例 | 1,210,726 | ⚠️ **商用许可未核验** |
-| `legal_qa_pairs` | 问答对 | 873,678 | ❌ 不引用（仅训练/评测） |
-| `legal_concepts` | 法律概念 | 18 | ⚠️ 覆盖不足 |
+| `legal_articles` | 法条 | 40,770 | ✅ 权威 |
+| `laws` | 法规 | 1,216 | ✅ 权威 |
+| `judicial_interpretations` | 司法解释 | 349 | ✅ 权威 |
+| `legal_cross_references` | 法条交叉引用 | 0（待重建） | ✅ 可商用 |
+| `court_cases` | 案例 | 1,000 | ⚠️ **商用许可未核验** |
+| `legal_qa_pairs` | 问答对 | 0（当前环境未导入） | ❌ 不引用（仅训练/评测） |
+| `legal_concepts` | 法律概念 | 0（当前环境未导入） | ⚠️ 覆盖不足 |
 
-**可引用语料合计约 72.6 万条**（法条 + 法规 + 司法解释 + 交叉引用）。
+**可引用语料合计约 4.2 万条**（法条 + 法规 + 司法解释）。
 
 ### Milvus（向量库）
 
+集合 `legal_articles` 的向量字段为 `embedding`（1024 维，IVF_FLAT / COSINE），
+编码文本为「条文首句（`title`）+ 正文」，与 PostgreSQL 条级一一对应。
+
 | 集合 | 向量数 |
 | --- | ---: |
-| `legal_articles` | 693,536 |
-| `legal_cases` | 307,780 |
-| `user_documents` | 4（企业知识库，待建设） |
+| `legal_articles` | 40,770（与 PG 行数一致） |
+| `legal_cases` | 1,000 |
+| `user_documents` | 1（企业知识库，待建设） |
 | `legal_knowledge` | 0（未启用） |
 
 ### 关于数据规模的诚实说明
 
 **对外指标不应是"有多少条"，而应是"引用是否可溯源、是否准确、是否有商用许可"。**
 
-- `court_cases` 的 121 万条中，相当部分为 HuggingFace 数据集的**标签级记录**
+- 数据规模随部署环境差异很大：2026-09 的历史环境曾全量导入 68.7 万条法条，
+  当前生产库是按条级重建后的精简语料（40,770 条）。**以本节实测数字为准**，
+  不要把历史指标当作现状。
+- `court_cases` 的 1,000 条多为 HuggingFace 数据集的**标签级记录**
   （`case_number` 形如 `HF-97de3926bbfd5054`，`court_name` 为空），
   **不是可直接展示的裁判文书**，商用许可需逐源复核。
 - `corpus_registry` 表已提供 `citable` 机制用于标记可引用性；
@@ -132,43 +140,65 @@
 
 ### 环境要求
 
-- **Python** 3.11+
-- **Node.js** 20+
-- **PostgreSQL** 16+（Docker 方式已内含）
+- **Python** 3.11+（Docker 镜像基于 `python:3.11-slim`）
+- **Node.js** 18+（推荐 20+，Vite 5 要求 18 及以上）
+- **PostgreSQL** 18（Docker 方式已内含 `postgres:18-alpine`）
 - **Docker** 与 **Docker Compose**（推荐）
 
 ### 方式一：Docker Compose（推荐）
 
 ```bash
-# 启动核心服务（backend 双副本 + frontend + postgres + redis + milvus 等）
+# 启动核心服务（backend 双副本 + frontend + postgres + redis）
 docker compose up -d
 
-# 含生产反向代理（Nginx 负载均衡）
+# 追加生产反向代理（Nginx，监听 80）
 docker compose --profile prod up -d
 
-# 启动全部服务
+# 启动全部服务（额外含 Milvus + etcd + MinIO + Neo4j + Elasticsearch）
 docker compose --profile full up -d
+
+# 一次性重任务容器（回填 / 批量向量化，用完即删）
+docker compose --profile tools run --rm backfill \
+  python scripts/backfill_milvus_articles.py
 
 # 停止
 docker compose down
 ```
 
-> ⚠️ 可用 profile 只有 **`prod`** 与 **`full`**（旧文档中的 `--profile dev` 并不存在）。
+> ⚠️ **Milvus 只在 `full` profile 下启动**。若只执行 `docker compose up -d`，
+> 向量检索会自动回退到 ChromaDB（本地开发用），生产环境务必带上 `--profile full`。
+>
+> 可用 profile 为 **`prod`**、**`full`**、**`tools`**（旧文档中的 `--profile dev` 并不存在）。
 
 **服务端口（实测）**
 
-| 服务 | 宿主机端口 |
-| --- | --- |
-| 前端 | `3000` |
-| Nginx（prod profile） | `80` |
-| PostgreSQL | **`5433`** |
-| Redis | `6379` |
-| Milvus | `19530` |
-| Neo4j | `7474` / `7687` |
-| Elasticsearch | `9200` |
+| 服务 | 宿主机端口 | 所属 profile |
+| --- | --- | --- |
+| 前端 | `3000`（云端部署仅绑定 `127.0.0.1`） | 默认 |
+| Nginx | `80`（云端部署另开 `443`） | `prod` / `full` |
+| PostgreSQL | **`5433`** | 默认 |
+| Redis | `6379` | 默认 |
+| Milvus | `19530` | `full` |
+| Neo4j | `7474` / `7687` | `full` |
+| Elasticsearch | `9200` | `full` |
 
-> 后端容器**不对外发布端口**，仅在 `legal_network` 内以 `8000` 提供服务；
-> 外部访问经前端 / Nginx 转发。PostgreSQL 宿主机端口是 **5433**（不是 5432）。
+> 后端容器**不对外发布端口**，仅在 `legal_network` 内以 **`8001`** 提供服务
+> （`docker-compose.yml` / `docker-compose.cloud.yml` 均设置 `PORT: 8001`，healthcheck
+> 也打 `:8001/health`）；外部访问经前端 / Nginx 转发。
+> 仅在本地手动 `uvicorn` 启动时才是 8000。
+> PostgreSQL 宿主机端口是 **5433**（不是 5432，见根目录 `.env` 的 `POSTGRES_PORT`）。
+
+**单机生产部署（云端，`docker-compose.cloud.yml`）**
+
+```bash
+# 单机常驻：postgres + redis + backend（1 副本）+ frontend + nginx(80/443)
+# + milvus + etcd + minio，无 profile 区分
+docker compose -f docker-compose.cloud.yml up -d
+```
+
+该文件是当前线上（4C8G 单机）实际使用的部署编排：backend 单副本、frontend 仅绑定
+`127.0.0.1:3000` 不直接暴露公网、Nginx 同时监听 80/443 并挂载 `nginx/nginx-cloud.conf`
+与 `nginx/ssl`。
 
 ### 方式二：Windows 一键启动
 
@@ -206,7 +236,8 @@ npm run dev
 
 启动后端后访问 **http://localhost:8000/docs** 查看完整 Swagger 文档。
 
-系统共 **153 个端点**、**23 个子路由**。主要路由前缀：
+系统共 **157 个接口端点**、**24 个路由模块**（`/api/v1` 下 23 个业务模块 + `app/mcp/server.py`），
+`/api/v1` 按 **23 个前缀**分组，主要路由前缀：
 
 | 前缀 | 功能 |
 | --- | --- |
@@ -221,10 +252,16 @@ npm run dev
 | `/api/v1/compliance` | 合规风控 |
 | `/api/v1/skills` | 技能包 |
 | `/api/v1/mcp` | 工具注册表（**执行端点仅管理员**） |
+| `/api/v1/mcp-server` | MCP Server（`/health` 开放，其余需鉴权） |
 | `/api/v1/knowledge` | 知识图谱 |
 | `/api/v1/collaboration` | 多智能体协同 |
 | `/api/v1/analytics` | 分析统计 |
-| `/api/v1/data` | 数据资产治理 |
+| `/api/v1/dashboard` | 工作台（数据概览 / 最近活动 / 系统状态） |
+| `/api/v1/data` | 数据资产治理与数据扩展 |
+| `/api/v1/tasks` | 异步任务 |
+| `/api/v1/feedback` | 用户反馈 |
+| `/api/v1/search` | 联网检索 |
+| `/api/v1/enterprise` | 企业版能力 |
 | `/api/v1/admin` | 管理后台 |
 | `/api/v1/batch` | 批量处理 |
 
@@ -357,7 +394,7 @@ Legal Intelligent Assistance System/
 │   │   │   └── review_agent.py             # 复核
 │   │   ├── api/
 │   │   │   ├── deps.py             # 依赖注入（含 get_current_admin_user）
-│   │   │   └── v1/                 # 23 个子路由
+│   │   │   └── v1/                 # 23 个业务路由模块（router.py 为聚合入口）
 │   │   │       ├── router.py       # 路由聚合 + 统一鉴权
 │   │   │       └── ...             # auth / chat / contract / document /
 │   │   │                           # law / cases / reasoning / litigation /
@@ -403,11 +440,17 @@ Legal Intelligent Assistance System/
 │   └── package.json
 ├── docs/                           # 项目文档
 ├── monitoring/                     # Prometheus + Grafana
-├── nginx/                          # 生产反向代理
+├── nginx/                          # 反向代理配置
+│   ├── nginx.conf                  # 本地 prod profile
+│   ├── nginx-ssl.conf
+│   ├── nginx-cloud.conf            # 云端单机（80/443）
+│   ├── nginx-cloud-ssl.conf
+│   └── ssl/
 ├── scripts/                        # 备份等运维脚本
-├── docker-compose.yml
-├── docker-compose.prod.yml
-├── start.bat
+├── docker-compose.yml              # 本地 / 通用（profile: prod / full / tools）
+├── docker-compose.prod.yml         # 生产覆盖层
+├── docker-compose.cloud.yml        # 当前线上单机编排（nginx 80/443 + Milvus 常驻）
+├── start.bat                       # Windows 一键启动
 ├── .gitignore
 └── README.md
 ```
@@ -491,17 +534,13 @@ docker exec <backend> python /app/scripts/quality_gate.py --min-score 0.5
 | 类别 | 来源 | 用途 | RAG 检索 |
 | --- | --- | --- | --- |
 | **权威可引用** | 国家法律法规数据库、最高法指导案例 | 法律依据展示 | ✅ 包含 |
-| **开源数据集** | CAIL / LawRefBook / DISC-LawLLM 等 | 评测与检索补充 | ✅ 包含 |
+| **开源数据集** | CAIL / LawRefBook / DISC-LawLLM 等 | 评测与微调（商用许可待核验） | ⚠️ 仅许可已核验部分 |
 | **LLM 增强** | DeepSeek 基于真实数据生成 | 检索补充 | ✅ 包含（带溯源标记） |
 | **合成数据** | 模板生成（已废弃） | 仅测试 | ❌ 自动排除 |
 
-系统使用的数据按**可引用性**分为三类，切勿混用：
-
-| 类别 | 来源 | 用途 |
-| --- | --- | --- |
-| **权威可引用** | 国家法律法规数据库（flk.npc.gov.cn）、最高法指导性案例与公报案例 | 作为法律依据展示 |
-| **研究许可** | CAIL / LAIC 等学术数据集、开源案例数据集 | 仅用于**评测与微调**，不作引用 |
-| **需商业授权** | 北大法宝 / 威科先行 / 中国司法大数据研究院等 | 商用前须取得授权 |
+> 另需区分**授权状态**：国家法律法规数据库（flk.npc.gov.cn）、最高法指导性案例与
+> 公报案例可直接作为法律依据；CAIL / LAIC 等学术数据集仅可用于评测与微调；
+> 北大法宝 / 威科先行 / 中国司法大数据研究院等数据商用前须取得授权。
 
 ### ⚠️ 关于爬取裁判文书网
 

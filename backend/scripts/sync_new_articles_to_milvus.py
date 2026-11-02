@@ -87,6 +87,20 @@ def _clean(text: str) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
+def _embed_text(title: str, content: str) -> str:
+    """向量编码文本 = 条文首句（title）+ 正文。
+
+    ``import_law_fulltext.split_articles()`` 会把条文第一句单独存进 ``title``，
+    正文不含这一句。只编码 ``content`` 会让首句完全不参与检索，因此拼接后再
+    encode；Milvus 的 ``content`` 字段仍只存正文，保持与 PG 可逐行比对。
+    """
+    t = (title or "").strip()
+    c = (content or "").strip()
+    if t and c:
+        return t + "\n" + c
+    return t or c
+
+
 def _connect():
     from pymilvus import Collection, connections
 
@@ -171,19 +185,24 @@ def _flush_batch(coll, model, limits, rows: list[tuple], dry_run: bool) -> tuple
     if not pending:
         return 0, len(rows)
 
-    texts = [_clean(r[2]) for _, r in pending]
-    keep = [(rid, r, t) for (rid, r), t in zip(pending, texts) if len(t) >= 5]
+    stored = [_clean(r[2]) for _, r in pending]
+    to_embed = [_clean(_embed_text(r[6], r[2])) for _, r in pending]
+    keep = [
+        (rid, r, s, e)
+        for (rid, r), s, e in zip(pending, stored, to_embed)
+        if len(s) >= 5
+    ]
     if not keep:
         return 0, len(rows)
 
-    embeddings = _embed(model, [t for _, _, t in keep])
+    embeddings = _embed(model, [e for _, _, _, e in keep])
     data = [
-        [truncate_utf8(rid, limits["id"]) for rid, _, _ in keep],
-        [truncate_utf8(r[4], limits["law_name"]) for _, r, _ in keep],
-        [truncate_utf8(r[1], limits["article_number"]) for _, r, _ in keep],
-        [truncate_utf8(t, limits["content"]) for _, _, t in keep],
-        [truncate_utf8(r[3], limits["tags"]) for _, r, _ in keep],
-        [truncate_utf8(r[5], limits["category"]) for _, r, _ in keep],
+        [truncate_utf8(rid, limits["id"]) for rid, _, _, _ in keep],
+        [truncate_utf8(r[4], limits["law_name"]) for _, r, _, _ in keep],
+        [truncate_utf8(r[1], limits["article_number"]) for _, r, _, _ in keep],
+        [truncate_utf8(s, limits["content"]) for _, _, s, _ in keep],
+        [truncate_utf8(r[3], limits["tags"]) for _, r, _, _ in keep],
+        [truncate_utf8(r[5], limits["category"]) for _, r, _, _ in keep],
         embeddings,
     ]
     coll.insert(data)
@@ -226,7 +245,7 @@ async def run(since: datetime | None, dry_run: bool, limit: int) -> None:
     stmt = (
         select(
             LegalArticle.id, LegalArticle.article_number, LegalArticle.content,
-            LegalArticle.tags, Law.name, Law.law_type,
+            LegalArticle.tags, Law.name, Law.law_type, LegalArticle.title,
         )
         .join(Law, Law.id == LegalArticle.law_id)
         .order_by(LegalArticle.created_at)
@@ -238,10 +257,10 @@ async def run(since: datetime | None, dry_run: bool, limit: int) -> None:
 
     async with async_session_factory() as db:
         result = await db.stream(stmt)
-        async for pk, art_num, content, tags, law_name, law_type in result:
+        async for pk, art_num, content, tags, law_name, law_type, art_title in result:
             buffer.append((
                 str(pk), art_num or "", content or "", tags or "",
-                law_name or "未知法律", law_type or "其他",
+                law_name or "未知法律", law_type or "其他", art_title or "",
             ))
             if len(buffer) >= MILVUS_BATCH:
                 inserted_n, skipped_n = await asyncio.to_thread(

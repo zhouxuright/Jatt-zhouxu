@@ -79,6 +79,13 @@ ARTICLE_RE = re.compile(r"^\s*(第[〇零一二三四五六七八九十百千万
 # 第X章 / 第X节 / 第X编
 CHAPTER_RE = re.compile(r"^\s*(第[〇零一二三四五六七八九十百千0-9]+[章编])(.*)$")
 SECTION_RE = re.compile(r"^\s*(第[〇零一二三四五六七八九十百千0-9]+节)(.*)$")
+# 裸标题：``附则`` 或 ``八、票据保证`` 这类中文数字编号的章节名。
+# 国家法律法规数据库的全文里，司法解释/部门规章大量使用这种写法，而上面的
+# CHAPTER_RE / SECTION_RE 只认「第X章/节/编」。不识别它们，标题就会被当成
+# 上一条的正文拼进去（历史上有 41 条法条因此只剩一个章节名）。
+# 只匹配短、无标点的行，并在调用处额外要求「下一行是第X条」，避免把条文内部
+# 的「一、……」枚举误判为章节标题。
+BARE_HEADING_RE = re.compile(r"^(附则|[一二三四五六七八九十]+、[^。，；：、]{1,20})$")
 
 ARTIFACT_LINE_RE = re.compile(r"^\s*(?:page\s*\d+|\d+\s*/\s*\d+)\s*$", re.IGNORECASE)
 
@@ -135,11 +142,16 @@ def split_articles(content: str) -> list[dict[str, str | None]]:
         if cur_number is None:
             return
         body = "\n".join(cur_lines).strip()
+        title = cur_title
+        if not body and title:
+            # 条文只有一句、被方案里的「短首句即标题」规则吃掉正文时，不能整条
+            # 丢弃（历史上 37 条法条因此只剩章节标题）：把标题降级为正文。
+            body, title = title, None
         if body:
             articles.append(
                 {
                     "article_number": cur_number,
-                    "title": cur_title,
+                    "title": title,
                     "content": body,
                     "chapter": cur_chapter,
                     "section": cur_section,
@@ -149,12 +161,27 @@ def split_articles(content: str) -> list[dict[str, str | None]]:
         cur_title = None
         cur_lines = []
 
-    for raw_line in lines:
-        line = raw_line.rstrip()
-        stripped = line.strip()
-        if not stripped or ARTIFACT_LINE_RE.match(stripped):
-            continue
+    # 先剔除空行与页码伪影，再按索引遍历：裸章节标题必须确认「下一行是第X条」
+    # 才认作标题，否则条文内部的「一、……」枚举会被误判。
+    clean_lines = [
+        ln.strip()
+        for ln in lines
+        if ln.strip() and not ARTIFACT_LINE_RE.match(ln.strip())
+    ]
 
+    def next_is_article(idx: int) -> bool:
+        return idx + 1 < len(clean_lines) and bool(ARTICLE_RE.match(clean_lines[idx + 1]))
+
+    def is_list_lead_in(idx: int) -> bool:
+        """上一行以「：」结尾 → 紧跟的「一、……」是条文内枚举，不是章节标题。
+
+        真实语料里条文枚举多用「（一）」写法，裸「一、」几乎只作章节标题；
+        但仍有文档写成「……按照以下情形分别处理：
+        一、……」这种枚举，用引导句结尾的冒号把这类情况排除掉。
+        """
+        return idx > 0 and clean_lines[idx - 1].endswith(("：", ":"))
+
+    for idx, stripped in enumerate(clean_lines):
         m_ch = CHAPTER_RE.match(stripped)
         if m_ch and not ARTICLE_RE.match(stripped):
             flush()
@@ -166,6 +193,16 @@ def split_articles(content: str) -> list[dict[str, str | None]]:
         if m_sec and not ARTICLE_RE.match(stripped):
             flush()
             section = (m_sec.group(1) + (m_sec.group(2) or "")).strip()[:128]
+            continue
+
+        if (
+            BARE_HEADING_RE.match(stripped)
+            and next_is_article(idx)
+            and not is_list_lead_in(idx)
+        ):
+            flush()
+            chapter = stripped[:128]
+            section = None
             continue
 
         m_art = ARTICLE_RE.match(stripped)
